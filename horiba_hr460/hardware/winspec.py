@@ -1,5 +1,5 @@
 """
-WinSpec32 COM Automation Interface & Simulated CCD Camera.
+Optional WinSpec32 COM Automation Interface.
 """
 
 from __future__ import annotations
@@ -8,6 +8,9 @@ import time
 import logging
 from typing import Optional, Tuple, Callable
 import numpy as np
+
+from .camera import MockCamera
+
 
 logger = logging.getLogger("horiba_hr460")
 

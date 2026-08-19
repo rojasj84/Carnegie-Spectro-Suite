@@ -1,6 +1,6 @@
 """
-Authentic Visual Basic 6 Form-styled GUI for Horiba HR460 / WinSpec32.
-Faithfully recreates the layout, controls, toolbars, menus, and dialogs of SpServer.frm / frmGlue / frmProps.
+Universal Visual Basic-styled GUI for Spectrometer & Detector Control.
+Recreates the classic spectroscopy workbench layout, controls, toolbars, menus, and dialogs.
 """
 
 from __future__ import annotations
@@ -31,15 +31,15 @@ from ..hardware.factory import create_spectrometer, create_camera
 
 class VBFormApp(tk.Tk):
     """
-    Main application form replicating the classic VB6 HR460/WinSpec32 interface (SpServer.frm).
+    Main application form for universal spectrometer and detector control.
     """
 
     def __init__(self, config_path: Optional[str] = None, force_mock: bool = False):
         super().__init__()
 
-        self.title("HR460/WinSpec32")
         self.geometry("1100x780")
         self.minsize(980, 680)
+
 
         # Style configuration (Classic Windows 3D / Win32 styling)
         self.style = ttk.Style(self)
@@ -61,6 +61,9 @@ class VBFormApp(tk.Tk):
         self.calibration = OpticalCalibration(self.sp_config.active_grating, self.sp_config.num_pixels)
         self.stitcher = SpectrumStitcher(self.calibration)
         self.force_mock = force_mock
+
+        # Update dynamic window title
+        self._update_window_title()
 
         # Initialize Hardware Drivers
         self.mono = create_spectrometer(self.sp_config, force_mock=self.force_mock)
@@ -135,27 +138,27 @@ class VBFormApp(tk.Tk):
         view_menu.add_command(label="Clear Overlaid Spectra", command=self._clear_loaded_spectra)
         menubar.add_cascade(label="View", menu=view_menu)
 
-        # --- WinSpec Menu ---
-        winspec_menu = tk.Menu(menubar, tearoff=0)
-        winspec_menu.add_command(label="Focus (Continuous)", command=self._on_toggle_focus)
-        winspec_menu.add_command(label="Get Spectrum (Go 1)", command=self._on_acquire_single)
-        winspec_menu.add_command(label="Get N Spectra (Go N)", command=self._on_acquire_multi)
-        winspec_menu.add_command(label="Stop Accumulation", command=self._on_stop)
-        winspec_menu.add_separator()
-        winspec_menu.add_command(label="Set Exposure Time...", command=self._prompt_exposure_time)
-        winspec_menu.add_command(label="Set Accumulations...", command=self._prompt_accumulations)
-        winspec_menu.add_separator()
+        # --- Acquisition Menu ---
+        acq_menu = tk.Menu(menubar, tearoff=0)
+        acq_menu.add_command(label="Focus (Continuous)", command=self._on_toggle_focus)
+        acq_menu.add_command(label="Get Spectrum (Go 1)", command=self._on_acquire_single)
+        acq_menu.add_command(label="Get N Spectra (Go N)", command=self._on_acquire_multi)
+        acq_menu.add_command(label="Stop Accumulation", command=self._on_stop)
+        acq_menu.add_separator()
+        acq_menu.add_command(label="Set Exposure Time...", command=self._prompt_exposure_time)
+        acq_menu.add_command(label="Set Accumulations...", command=self._prompt_accumulations)
+        acq_menu.add_separator()
         
-        filter_menu = tk.Menu(winspec_menu, tearoff=0)
+        filter_menu = tk.Menu(acq_menu, tearoff=0)
         self.var_filter_mode = tk.StringVar(value="Median")
         filter_menu.add_radiobutton(label="Median Filter (Cosmic Ray Rejection)", variable=self.var_filter_mode, value="Median", command=self._update_filter_mode)
         filter_menu.add_radiobutton(label="Threshold Filter", variable=self.var_filter_mode, value="Threshold", command=self._update_filter_mode)
         filter_menu.add_radiobutton(label="Filter Off", variable=self.var_filter_mode, value="Off", command=self._update_filter_mode)
-        winspec_menu.add_cascade(label="Cosmic Ray Filters", menu=filter_menu)
+        acq_menu.add_cascade(label="Cosmic Ray Filters", menu=filter_menu)
 
         self.var_sim_mode = tk.BooleanVar(value=self.force_mock)
-        winspec_menu.add_checkbutton(label="Simulation Mode (Demo)", variable=self.var_sim_mode, command=self._toggle_simulation_mode)
-        menubar.add_cascade(label="WinSpec", menu=winspec_menu)
+        acq_menu.add_checkbutton(label="Simulation Mode (Demo)", variable=self.var_sim_mode, command=self._toggle_simulation_mode)
+        menubar.add_cascade(label="Acquisition", menu=acq_menu)
 
         # --- Spectrometer (Call) Menu ---
         call_menu = tk.Menu(menubar, tearoff=0)
@@ -191,7 +194,7 @@ class VBFormApp(tk.Tk):
         # --- Help Menu ---
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="Basic Help", command=self._open_help_dialog)
-        help_menu.add_command(label="About WizSpec...", command=self._open_about_dialog)
+        help_menu.add_command(label="About Spectrometer Suite...", command=self._open_about_dialog)
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.configure(menu=menubar)
@@ -889,10 +892,16 @@ class VBFormApp(tk.Tk):
     def _open_ruby_dialog(self):
         RubyDialog(self)
 
+    def _update_window_title(self):
+        model = getattr(self.sp_config, "instrument_model", "Spectrometer")
+        port = getattr(self.sp_config, "com_port", "COM")
+        mode = " [Demo Mode]" if getattr(self, "force_mock", False) else ""
+        self.title(f"Spectrometer Suite ({model} on {port}){mode}")
+
     def _open_help_dialog(self):
         messagebox.showinfo(
-            "WizSpec Help",
-            "Horiba Jobin Yvon HR460 & WinSpec32 Control Suite\n\n"
+            "Spectrometer Suite Help",
+            "Universal Spectrometer & Detector Control Suite\n\n"
             "- Use 'Go 1' for single spectrum acquisition\n"
             "- Use 'Go N' for multi-accumulation with cosmic ray removal\n"
             "- Use 'Focus' for real-time alignment and continuous acquisition\n"
@@ -902,13 +911,14 @@ class VBFormApp(tk.Tk):
 
     def _open_about_dialog(self):
         g = self.sp_config.active_grating
+        cam_type = getattr(self.sp_config, "camera_model", "Simulated Detector")
         messagebox.showinfo(
-            "About WizSpec / WinSpec32",
-            "WizSpec/WinSpec32 Spectrometer Interface\n"
-            "Modern Python Re-implementation of WizSpec (c) Viktor Struzhkin\n\n"
+            "About Spectrometer Suite",
+            "Universal Spectrometer & Detector Control Suite\n\n"
             f"Spectrometer: {self.sp_config.instrument_model} (Focal length {g.focal_length_mm:.0f} mm)\n"
-            "Detector: Princeton Instruments CCD (WinSpec32 / SPE)\n"
-            "Interface: RS-232 Monochromator Control & ActiveX/COM Detector Automation"
+            f"Detector: {cam_type} ({self.sp_config.num_pixels} pixels)\n"
+            f"Communication: {self.sp_config.com_port} @ {self.sp_config.baudrate} baud\n"
+            "Architecture: Multi-vendor Monochromator & Modular Detector Drivers"
         )
 
     # Prompt dialog helpers

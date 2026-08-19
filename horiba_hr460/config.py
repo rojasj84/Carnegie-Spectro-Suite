@@ -44,7 +44,7 @@ class GratingConfig:
 
 @dataclass
 class SpectrometerConfig:
-    """Complete Horiba HR460 system configuration including dual gratings."""
+    """Complete spectrometer and detector system configuration."""
     gratings: list[GratingConfig] = field(default_factory=lambda: [
         GratingConfig(grating_grooves_per_mm=1800.0, spectrometer_pos_nm=700.0),
         GratingConfig(grating_grooves_per_mm=300.0, spectrometer_pos_nm=700.0)
@@ -52,6 +52,7 @@ class SpectrometerConfig:
     active_grating_index: int = 0          # 0 for Grating 1, 1 for Grating 2
     num_pixels: int = 1024                 # Detector pixel count (e.g., 1024, 1340, 1400)
     instrument_model: str = "HR460"        # Spectrometer driver to use: "HR460" or "ACTON"
+    camera_model: str = "SIMULATED"        # Detector driver to use: "SIMULATED", "MOCK", "WINSPEC", etc.
     com_port: str = "COM1"                 # Serial COM port for the spectrometer controller
     baudrate: int = 9600                   # Serial baudrate
     spe_data_path: str = "calib.spe"       # Path for temporary SPE acquisition transfer
@@ -170,6 +171,7 @@ class SpectrometerConfig:
             "active_grating_index": self.active_grating_index,
             "num_pixels": self.num_pixels,
             "instrument_model": self.instrument_model,
+            "camera_model": self.camera_model,
             "com_port": self.com_port,
             "baudrate": self.baudrate,
             "spe_data_path": self.spe_data_path,
@@ -205,6 +207,7 @@ class SpectrometerConfig:
             active_grating_index=data.get("active_grating_index", 0),
             num_pixels=data.get("num_pixels", 1024),
             instrument_model=data.get("instrument_model", "HR460"),
+            camera_model=data.get("camera_model", "SIMULATED"),
             com_port=data.get("com_port", "COM1"),
             baudrate=data.get("baudrate", 9600),
             spe_data_path=data.get("spe_data_path", "calib.spe"),

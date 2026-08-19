@@ -1,5 +1,5 @@
 """
-Modern Desktop Interface for Horiba HR460 & WinSpec CCD.
+Modern Desktop Interface for Spectrometer & Detector Control Suite.
 Built with CustomTkinter and embedded Matplotlib.
 """
 
@@ -31,12 +31,12 @@ ctk.set_default_color_theme("blue")
 
 
 class HoribaApp(ctk.CTk):
-    """Main application window for Horiba HR460 & WinSpec control."""
+    """Main application window for Spectrometer & Detector control."""
 
     def __init__(self, config_path: Optional[str] = None, force_mock: bool = False):
         super().__init__()
 
-        self.title("Horiba HR460 / WinSpec Control Suite (Python)")
+        self.title("Spectrometer & Detector Control Suite")
         self.geometry("1240x820")
         self.minsize(1050, 700)
 
@@ -157,7 +157,7 @@ class HoribaApp(ctk.CTk):
         self.cbo_grating.pack(side="left", padx=5)
 
         # 2. Camera & Acquisition Section
-        cam_label = ctk.CTkLabel(self.sidebar, text="CCD Acquisition (WinSpec)", font=ctk.CTkFont(size=16, weight="bold"))
+        cam_label = ctk.CTkLabel(self.sidebar, text="Detector Acquisition", font=ctk.CTkFont(size=16, weight="bold"))
         cam_label.pack(anchor="w", padx=10, pady=(15, 5))
 
         cam_frame = ctk.CTkFrame(self.sidebar)
@@ -332,8 +332,8 @@ class HoribaApp(ctk.CTk):
 
     def _update_connection_status(self):
         self.status_hw.configure(text=f"Monochromator: {self.mono.status.value}")
-        cam_type = "Mock Simulated" if self.camera.is_mock else "WinSpec32 COM"
-        self.status_cam.configure(text=f"Camera: {cam_type}")
+        cam_type = "Simulated (Mock)" if self.camera.is_mock else getattr(self.config, "camera_model", "Connected")
+        self.status_cam.configure(text=f"Detector: {cam_type}")
         self._refresh_plot()
 
     def _refresh_plot(self):

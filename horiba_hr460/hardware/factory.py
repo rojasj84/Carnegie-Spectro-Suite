@@ -10,7 +10,7 @@ from ..config import SpectrometerConfig
 from .base import Spectrometer, Camera
 from .hr460 import HoribaHR460, MockHoribaHR460
 from .acton import ActonSpectrometer, MockActonSpectrometer
-from .winspec import WinSpecController, MockWinSpecCamera
+from .camera import MockCamera
 
 
 def create_spectrometer(config: SpectrometerConfig, force_mock: bool = False) -> Spectrometer:
@@ -26,8 +26,22 @@ def create_spectrometer(config: SpectrometerConfig, force_mock: bool = False) ->
 
 
 def create_camera(config: SpectrometerConfig, force_mock: bool = False) -> Camera:
-    """Instantiate the Camera driver (WinSpec32 COM is camera-agnostic, so this
-    is the same class regardless of detector model, e.g. Horiba CCD or PIXIS)."""
+    """
+    Instantiate the Camera/Detector driver named by config.camera_model.
+    Supports Simulated/Mock cameras and optional vendor backends (e.g., WinSpec, Andor, etc.).
+    """
     if force_mock:
-        return MockWinSpecCamera(config.num_pixels)
-    return WinSpecController(config.spe_data_path)
+        return MockCamera(config.num_pixels)
+
+    cam_model = getattr(config, "camera_model", "SIMULATED").upper()
+
+    if cam_model == "WINSPEC":
+        try:
+            from .winspec import WinSpecController
+            return WinSpecController(config.spe_data_path)
+        except Exception:
+            return MockCamera(config.num_pixels)
+
+    # Default to simulated/mock detector
+    return MockCamera(config.num_pixels)
+

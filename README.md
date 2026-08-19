@@ -1,18 +1,18 @@
-# Horiba HR460 & WinSpec Python Control Suite
+# Universal Spectrometer & Detector Python Control Suite
 
-A modern Python package and graphical interface for controlling the **Horiba Jobin Yvon HR460 Monochromator / Spectrometer** and **Princeton Instruments CCD Cameras** (via WinSpec32 COM automation or standalone SPE files).
-
-This package is a modernized, modular Python implementation of the legacy Visual Basic 6 software (`WizSpec` / `SpServer` in `HR460-PICCD`).
+A modern Python package and graphical interface for multi-vendor **Spectrometers / Monochromators** (Acton SpectraPro, Horiba Jobin Yvon HR460, etc.) and **Optical Detectors / Cameras** (Simulated arrays, WinSpec COM automation, and extensible camera drivers).
 
 ---
 
 ## Key Features
 
-- **Horiba HR460 Serial Driver**:
-  - Full RS-232 communication protocol support (handshakes, motor stepping, status polling, slit control, dual grating turret selection).
-  - Built-in simulation / mock driver for offline testing and development without hardware attached.
-- **Princeton Instruments WinSpec32 & SPE Support**:
-  - COM / ActiveX automation (`WinX32.ExpSetup` / `WinX32.DocFile`) for automated CCD acquisition and focus mode.
+- **Multi-Vendor Spectrometer Serial Drivers**:
+  - **Acton SpectraPro**: Rapid GOTO wavelength slewing, multi-grating turret indexing, motor diagnostics, and status queries.
+  - **Horiba Jobin Yvon HR460**: Full RS-232 communication protocol support (handshakes, motor stepping, status polling, slit control, dual grating turret selection).
+  - Built-in simulation / mock drivers for offline testing and development without hardware attached.
+- **Modular Optical Detector / Camera Architecture**:
+  - Generic [`Camera`](file:///c:/Users/LabUserR129/Documents/Github/Horiba-HR460/horiba_hr460/hardware/base.py) interface and [`MockCamera`](file:///c:/Users/LabUserR129/Documents/Github/Horiba-HR460/horiba_hr460/hardware/camera.py) generator with synthetic spectral lines and Poisson shot noise.
+  - Extensible backend support for physical detectors (e.g. WinSpec COM, Thorlabs, Andor, FLIR).
   - Native binary reader & writer for Princeton Instruments `.spe` files (SPE 2.x/3.x).
   - Standalone ASCII `.dat` file export.
 - **Optical Calibration Engine**:
@@ -21,10 +21,10 @@ This package is a modernized, modular Python implementation of the legacy Visual
   - Ruby $R_1$ fluorescence pressure scale ($P(T, \lambda)$ Mao-Bell calculation).
 - **Signal Processing & Wide-Range Stitching**:
   - Cosmic ray spike rejection (threshold delta test and temporal 3-point median across accumulations).
-  - Multi-window stepped scan planner and spectral stitcher / glueing engine.
-- **Authentic VB6 Form GUI**:
-  - Exact layout, toolbar, buttons, and menus matching `SpServer.frm` (`Picture1` canvas, `posHR460`, `txtSlit`, `cmbGrating`, `cmbXscale`, `cmbLaser`, `Mouse Pos`, `Cursor Pos`, `Pressure/Temp`).
-  - Integrated sub-forms: Long Spectrum Glue (`frmGlue.frm`), Port Properties (`Frmprops.frm`), Ruby Pressure Calibration, and About Dialog (`frmInfo.frm`).
+  - Multi-window stepped scan planner and spectral stitcher / gluing engine.
+- **Classic Visual Basic Form GUI**:
+  - Authentic spectroscopy workbench layout, toolbars, buttons, and menus matching standard laboratory instruments.
+  - Integrated sub-forms: Long Spectrum Glue, Port Properties, Ruby Pressure Calibration, and About Dialog.
 - **Modern Desktop GUI**:
   - Optional dark-theme interface (`--modern`) built with CustomTkinter.
 
@@ -34,8 +34,8 @@ This package is a modernized, modular Python implementation of the legacy Visual
 
 ```
 horiba_hr460/
-├── __init__.py           # Package exports
-├── config.py             # Spectrometer configuration & legacy .cfg parser/writer
+├── __init__.py           # Package exports (Spectrometer, Camera, MockCamera, etc.)
+├── config.py             # System configuration model & JSON/legacy .cfg loader
 ├── cli.py                # Command-line interface
 ├── core/
 │   ├── __init__.py
@@ -45,13 +45,17 @@ horiba_hr460/
 │   └── stitcher.py       # Multi-window spectrum stitching / gluing engine
 ├── hardware/
 │   ├── __init__.py
-│   ├── hr460.py          # Horiba HR460 RS-232 serial driver + Mock simulator
-│   └── winspec.py        # WinSpec32 COM automation client + Mock camera
+│   ├── base.py           # Protocol definitions: Spectrometer & Camera
+│   ├── factory.py        # Hardware instantiation factory
+│   ├── acton.py          # Acton SpectraPro serial driver & mock simulator
+│   ├── hr460.py          # Horiba HR460 serial driver & mock simulator
+│   ├── camera.py         # Universal MockCamera / simulated detector driver
+│   └── winspec.py        # Optional WinSpec32 COM automation client
 ├── gui/
 │   ├── __init__.py
-│   ├── vb_app.py         # Classic VB6 form replica (SpServer.frm / frmGlue / frmProps)
-│   └── app.py            # Modern CustomTkinter interface
-└── tests/                # Automated test suite (19 unit tests)
+│   ├── vb_app.py         # Classic VB-styled workbench GUI
+│   └── app.py            # Modern CustomTkinter dark-theme interface
+└── tests/                # Automated test suite (32 unit tests)
 ```
 
 ---
@@ -65,6 +69,11 @@ horiba_hr460/
   python main.py
   ```
   *(or double-click **`run_gui.bat`** on Windows)*
+
+- **With Acton SP2150 Configuration:**
+  ```bash
+  python main.py gui --config config_acton_sp2150.json
+  ```
 
 - **Simulation / Demo Mode (No hardware required):**
   ```bash
@@ -80,16 +89,13 @@ horiba_hr460/
 
 ```bash
 # View configuration & calculated dispersion coverage
-python -m horiba_hr460.cli info
+python -m horiba_hr460.cli info --config config_acton_sp2150.json
 
 # Acquire a spectrum (1s exposure, 3 accumulations)
 python -m horiba_hr460.cli acquire --exposure 1.0 --accum 3 --output spectrum.dat
 
-# Move monochromator to 700 nm
-python -m horiba_hr460.cli move --wavelength 700.0 --port COM1
-
-# Convert Princeton Instruments .spe file to ASCII .dat
-python -m horiba_hr460.cli spe2dat data/sample.spe data/sample.dat
+# Move Acton monochromator to 700 nm on COM3
+python -m horiba_hr460.cli move --wavelength 700.0 --port COM3 --model ACTON
 ```
 
 ---
@@ -101,51 +107,40 @@ python -m horiba_hr460.cli spe2dat data/sample.spe data/sample.dat
 ```python
 from horiba_hr460 import SpectrometerConfig, OpticalCalibration, Units
 
-# Load configuration from legacy Wsp-460.cfg
-config = SpectrometerConfig.from_legacy_cfg("HR460-PICCD/Wsp-460.cfg")
+# Load configuration from JSON
+config = SpectrometerConfig.from_json("config_acton_sp2150.json")
 cal = OpticalCalibration(config.active_grating, num_pixels=config.num_pixels)
 
 # Calculate wavelength array at center = 700.0 nm
 wavelengths_nm = cal.get_pixel_wavelengths(center_wavelength_nm=700.0)
 
-# Convert to Raman shift (cm-1) using 514.532 nm excitation laser
+# Convert to Raman shift (cm-1) using 1064.0 nm excitation laser
 raman_shift_cm1 = cal.convert_wavelengths_to_units(
     wavelengths_nm,
     unit=Units.REL_CM_1,
-    laser_wavelength_nm=514.532
+    laser_wavelength_nm=1064.0
 )
 ```
 
-### Example 2: Controlling the Monochromator & Acquiring Data
+### Example 2: Controlling the Spectrometer & Acquiring Data
 
 ```python
-from horiba_hr460 import HoribaHR460, WinSpecController, remove_cosmic_rays_median
+from horiba_hr460 import create_spectrometer, create_camera, SpectrometerConfig, remove_cosmic_rays_median
 
-# Connect to HR460 and WinSpec
-mono = HoribaHR460(port="COM1")
+config = SpectrometerConfig.from_json("config_acton_sp2150.json")
+
+# Connect to spectrometer (Acton SP2150 on COM3)
+mono = create_spectrometer(config)
 mono.connect()
-mono.move_to_wavelength(700.0)
+mono.move_to_wavelength(750.0)
 
-camera = WinSpecController()
+# Connect to detector
+camera = create_camera(config)
 camera.connect()
 
 # Acquire 3 frames and remove cosmic rays
 frames = [camera.acquire_frame(exposure_time_sec=1.0)[0] for _ in range(3)]
 clean_spectrum = remove_cosmic_rays_median(frames)
-```
-
-### Example 3: Wide-Range Spectrum Stitching (Glue)
-
-```python
-from horiba_hr460 import SpectrumStitcher
-
-stitcher = SpectrumStitcher(cal)
-
-# Plan stepped windows from 600 nm to 800 nm with 50-pixel overlap
-intervals = stitcher.plan_intervals(from_nm=600.0, to_nm=800.0, overlap_pixels=50)
-
-# Stitch acquired windows into a single continuous dataset
-x_stitched, y_stitched = stitcher.stitch_spectra(wavelength_windows, intensity_windows)
 ```
 
 ---

@@ -1,6 +1,6 @@
 """
-Main Entry Point for Horiba HR460 & WinSpec32 Control Suite.
-============================================================
+Main Entry Point for Universal Spectrometer & Detector Control Suite.
+=====================================================================
 Running this file directly (or double-clicking it) launches the
 Graphical User Interface (GUI) immediately.
 """

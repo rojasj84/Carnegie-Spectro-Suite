@@ -61,7 +61,7 @@ class TestSpectrometerConfig(unittest.TestCase):
                 os.remove(tmp_path)
 
     def test_json_serialization(self):
-        cfg = SpectrometerConfig()
+        cfg = SpectrometerConfig(instrument_model="ACTON", camera_model="MOCK")
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as tmp:
             tmp_path = tmp.name
 
@@ -70,6 +70,8 @@ class TestSpectrometerConfig(unittest.TestCase):
             loaded_cfg = SpectrometerConfig.from_json(tmp_path)
             self.assertEqual(len(loaded_cfg.gratings), 2)
             self.assertEqual(loaded_cfg.active_grating_index, 0)
+            self.assertEqual(loaded_cfg.instrument_model, "ACTON")
+            self.assertEqual(loaded_cfg.camera_model, "MOCK")
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)

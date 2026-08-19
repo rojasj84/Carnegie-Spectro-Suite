@@ -15,7 +15,7 @@ def remove_cosmic_rays_threshold(
     factor: float = 3.0
 ) -> np.ndarray:
     """
-    Cosmic ray suppression via threshold delta test (replicates legacy WizSpec threshold mode).
+    Cosmic ray suppression via threshold delta test.
     If |current - previous| / threshold > factor, the pixel is replaced by the running average.
     """
     clean_frame = np.copy(current_frame)

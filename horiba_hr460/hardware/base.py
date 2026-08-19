@@ -54,7 +54,7 @@ class Spectrometer(Protocol):
 
 @runtime_checkable
 class Camera(Protocol):
-    """Interface satisfied by any detector driver (e.g. WinSpecController, MockWinSpecCamera)."""
+    """Interface satisfied by any detector / camera driver (e.g. MockCamera, WinSpecController, etc.)."""
 
     is_connected: bool
     is_mock: bool

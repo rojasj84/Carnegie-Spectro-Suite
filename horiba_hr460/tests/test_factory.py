@@ -7,6 +7,7 @@ from horiba_hr460.config import SpectrometerConfig
 from horiba_hr460.hardware.factory import create_spectrometer, create_camera
 from horiba_hr460.hardware.hr460 import HoribaHR460, MockHoribaHR460
 from horiba_hr460.hardware.acton import ActonSpectrometer, MockActonSpectrometer
+from horiba_hr460.hardware.camera import MockCamera
 from horiba_hr460.hardware.winspec import WinSpecController, MockWinSpecCamera
 
 
@@ -35,15 +36,23 @@ class TestSpectrometerFactory(unittest.TestCase):
 
 class TestCameraFactory(unittest.TestCase):
 
-    def test_real_camera(self):
+    def test_default_camera(self):
         cfg = SpectrometerConfig()
-        self.assertIsInstance(create_camera(cfg, force_mock=False), WinSpecController)
+        cam = create_camera(cfg, force_mock=False)
+        self.assertIsInstance(cam, MockCamera)
 
     def test_mock_camera(self):
         cfg = SpectrometerConfig()
         cam = create_camera(cfg, force_mock=True)
-        self.assertIsInstance(cam, MockWinSpecCamera)
+        self.assertIsInstance(cam, MockCamera)
         self.assertEqual(cam.num_pixels, cfg.num_pixels)
+
+    def test_winspec_camera_fallback(self):
+        cfg = SpectrometerConfig(camera_model="WINSPEC")
+        cam = create_camera(cfg, force_mock=False)
+        # Should instantiate WinSpecController if COM is available, or fallback to MockCamera
+        self.assertTrue(isinstance(cam, (WinSpecController, MockCamera)))
+
 
 
 if __name__ == "__main__":

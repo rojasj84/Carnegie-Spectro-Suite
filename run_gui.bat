@@ -1,5 +1,5 @@
 @echo off
-title Horiba HR460 / Acton SP2150 & WinSpec32 Suite
+title Spectrometer & Detector Control Suite
 setlocal
 
 set "PYTHON_EXE=python"

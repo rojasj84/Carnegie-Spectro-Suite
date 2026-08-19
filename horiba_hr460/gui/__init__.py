@@ -1,5 +1,5 @@
 """
-GUI package for Horiba HR460 & WinSpec Python Suite.
+GUI package for Universal Spectrometer & Detector Suite.
 """
 
 from .vb_app import VBFormApp, launch_vb_gui

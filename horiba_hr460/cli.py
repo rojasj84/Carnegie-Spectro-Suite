@@ -1,5 +1,5 @@
 """
-Command-Line Interface (CLI) for Horiba HR460 & WinSpec Python Suite.
+Command-Line Interface (CLI) for Universal Spectrometer & Detector Control Suite.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .hardware.factory import create_spectrometer, create_camera
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Horiba HR460 Spectrometer & WinSpec CCD Control Suite"
+        description="Universal Spectrometer & Detector Control Suite"
     )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
@@ -79,7 +79,7 @@ def main():
         wls = cal.get_pixel_wavelengths()
 
         print("=" * 60)
-        print("Horiba HR460 Spectrometer Configuration")
+        print(f"{cfg.instrument_model} Spectrometer Configuration")
         print("=" * 60)
         print(f"Focal Length:          {g.focal_length_mm:.1f} mm")
         print(f"Active Grating:        {g.grating_grooves_per_mm:.0f} grooves/mm (Turret {cfg.active_grating_index + 1})")
@@ -99,7 +99,7 @@ def main():
 
         cam = create_camera(cfg, force_mock=args.mock)
         if not cam.connect() and not args.mock:
-            print("Could not connect to WinSpec32 COM, falling back to mock camera.")
+            print("Could not connect to physical detector, falling back to simulated camera.")
             cam = create_camera(cfg, force_mock=True)
             cam.connect()
 

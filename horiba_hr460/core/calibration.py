@@ -23,7 +23,7 @@ class Units(str, Enum):
 def ruby_pressure(wavelength_nm: float, temperature_k: float = 300.0) -> float:
     """
     Calculate pressure (in GPa) from Ruby R1 fluorescence peak wavelength and temperature
-    using the Mao-Bell calibrated scale as implemented in legacy WizSpec.
+    using the standard Mao-Bell calibrated scale.
     """
     if temperature_k < 80.0:
         delta = 0.92
