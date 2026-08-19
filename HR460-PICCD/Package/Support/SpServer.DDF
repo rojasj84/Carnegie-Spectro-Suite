@@ -1,0 +1,31 @@
+.OPTION EXPLICIT
+.Set Cabinet=off
+.Set Compress=off
+.Set MaxDiskSize=CDROM
+.Set ReservePerCabinetSize=6144
+.Set DiskDirectoryTemplate=".."
+.Set CompressionType=MSZIP
+.Set CompressionLevel=7
+.Set CompressionMemory=21
+.Set CabinetNameTemplate="Wizspec2.CAB"
+"Setup.Lst"
+"setup.exe"
+.Set Cabinet=on
+.Set Compress=on
+"Wizspec2.exe"
+"MSVBVM60.DLL"
+"oleaut32.dll"
+"olepro32.dll"
+"asycfilt.dll"
+"stdole2.tlb"
+"COMCAT.DLL"
+"comdlg32.ocx"
+"MSCOMM32.OCX"
+"comctl32.ocx"
+"MSWINSCK.OCX"
+"SETUP1.EXE"
+"VB6STKIT.DLL"
+"ST6UNST.EXE"
+"WSP-460.CFG"
+"NEON.LIN"
+"WIZSPEC.HLP"
