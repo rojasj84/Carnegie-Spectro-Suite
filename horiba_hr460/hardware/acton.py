@@ -161,35 +161,24 @@ class ActonSpectrometer:
         progress_callback: Optional[Callable[[float], None]] = None
     ) -> bool:
         """
-        Move to an absolute wavelength using the non-blocking '>NM' command, polling
-        '?NM' / 'MONO-?DONE' for progress, and terminating with 'MONO-STOP'.
+        Move to an absolute wavelength using the rapid 'GOTO' command.
         """
         if not self.ser:
             return False
 
         self.status = MonochromatorStatus.MOVING
         try:
-            self._send(f"{target_nm:.3f} >NM", timeout=5.0)
-            deadline = time.time() + 120.0
-            while time.time() < deadline:
-                wl = self._query_float("?NM", timeout=2.0)
-                if wl is not None:
-                    self._current_wavelength_nm = wl
-                    if progress_callback:
-                        progress_callback(wl)
-                done = self._query_float("MONO-?DONE", timeout=2.0)
-                if done == 1:
-                    break
-                time.sleep(0.2)
+            # GOTO rapidly slews directly to target wavelength
+            self._send(f"{target_nm:.3f} GOTO", timeout=30.0)
+            self.read_position()
+            if progress_callback:
+                progress_callback(self._current_wavelength_nm)
         finally:
-            try:
-                self._send("MONO-STOP", timeout=5.0)
-            except Exception as ex:
-                logger.debug(f"MONO-STOP failed (non-fatal): {ex}")
             self.status = MonochromatorStatus.READY
             self.read_position()
 
         return True
+
 
     def read_position(self) -> float:
         """Query current wavelength position ('?NM')."""
