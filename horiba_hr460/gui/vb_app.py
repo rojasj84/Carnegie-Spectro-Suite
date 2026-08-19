@@ -27,6 +27,8 @@ from ..core.stitcher import SpectrumStitcher, StitchInterval
 from ..core.spe_file import read_spe, write_spe, SpeFile
 from ..hardware.base import MonochromatorStatus
 from ..hardware.factory import create_spectrometer, create_camera
+from ..core.profiles import load_app_settings, clear_default_settings
+from .device_selector import DeviceSelectorDialog
 
 
 class VBFormApp(tk.Tk):
@@ -34,12 +36,16 @@ class VBFormApp(tk.Tk):
     Main application form for universal spectrometer and detector control.
     """
 
-    def __init__(self, config_path: Optional[str] = None, force_mock: bool = False):
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        force_mock: bool = False,
+        config: Optional[SpectrometerConfig] = None
+    ):
         super().__init__()
 
         self.geometry("1100x780")
         self.minsize(980, 680)
-
 
         # Style configuration (Classic Windows 3D / Win32 styling)
         self.style = ttk.Style(self)
@@ -49,14 +55,25 @@ class VBFormApp(tk.Tk):
             pass
 
         # Load Configuration
-        self.config_path = config_path or self._find_default_config()
-        if self.config_path and os.path.exists(self.config_path):
-            if self.config_path.endswith(".json"):
-                self.sp_config = SpectrometerConfig.from_json(self.config_path)
-            else:
-                self.sp_config = SpectrometerConfig.from_legacy_cfg(self.config_path)
+        if config is not None:
+            self.sp_config = config
+            self.config_path = config_path
         else:
-            self.sp_config = SpectrometerConfig()
+            self.config_path = config_path or self._find_default_config()
+            if self.config_path and os.path.exists(self.config_path):
+                if self.config_path.endswith(".json"):
+                    self.sp_config = SpectrometerConfig.from_json(self.config_path)
+                else:
+                    self.sp_config = SpectrometerConfig.from_legacy_cfg(self.config_path)
+            else:
+                saved = load_app_settings().get("saved_config")
+                if saved:
+                    try:
+                        self.sp_config = SpectrometerConfig.from_dict(saved)
+                    except Exception:
+                        self.sp_config = SpectrometerConfig()
+                else:
+                    self.sp_config = SpectrometerConfig()
 
         self.calibration = OpticalCalibration(self.sp_config.active_grating, self.sp_config.num_pixels)
         self.stitcher = SpectrumStitcher(self.calibration)
@@ -99,7 +116,7 @@ class VBFormApp(tk.Tk):
         self._connect_hardware_async()
 
     def _find_default_config(self) -> Optional[str]:
-        candidates = ["Wsp-460.cfg", "DEFAULT.CFG", "wsp-460.cfg"]
+        candidates = ["config_acton_sp2150.json", "Wsp-460.cfg", "DEFAULT.CFG", "wsp-460.cfg"]
         for c in candidates:
             if os.path.exists(c):
                 return c
@@ -187,6 +204,9 @@ class VBFormApp(tk.Tk):
 
         # --- Configuration Menu ---
         config_menu = tk.Menu(menubar, tearoff=0)
+        config_menu.add_command(label="Select / Switch Spectrometer & Camera...", command=self._open_device_selector)
+        config_menu.add_command(label="Clear Default Startup Instrument", command=self._clear_default_device)
+        config_menu.add_separator()
         config_menu.add_command(label="Set Excitation Laser Wavelength...", command=self._prompt_laser_wavelength)
         config_menu.add_command(label="Communication Port Properties...", command=self._open_properties_dialog)
         menubar.add_cascade(label="Configuration", menu=config_menu)
@@ -881,8 +901,48 @@ class VBFormApp(tk.Tk):
         self.destroy()
 
     # =========================================================================
-    # 11. SUB-DIALOGS (Properties, Glue, Ruby, About)
+    # 11. SUB-DIALOGS (Properties, Glue, Ruby, About, Device Selector)
     # =========================================================================
+    def _open_device_selector(self):
+        dialog = DeviceSelectorDialog(parent=self, initial_config=self.sp_config)
+        action, cfg, mock = dialog.show()
+        if action in ("LAUNCH", "DEMO") and cfg:
+            self._switch_hardware(cfg, force_mock=mock)
+
+    def _clear_default_device(self):
+        clear_default_settings()
+        messagebox.showinfo(
+            "Default Startup Instrument Cleared",
+            "Default startup instrument preference has been cleared.\n\n"
+            "The hardware setup window will appear the next time you open the application."
+        )
+
+    def _switch_hardware(self, new_config: SpectrometerConfig, force_mock: bool = False):
+        if self.mono:
+            try:
+                self.mono.disconnect()
+            except Exception:
+                pass
+        if self.camera:
+            try:
+                self.camera.disconnect()
+            except Exception:
+                pass
+
+        self.sp_config = new_config
+        self.force_mock = force_mock
+        self.calibration = OpticalCalibration(self.sp_config.active_grating, self.sp_config.num_pixels)
+        self.stitcher = SpectrumStitcher(self.calibration)
+        self._update_window_title()
+
+        if hasattr(self, "call_menu"):
+            self.call_menu.entryconfigure(0, label=f"Model: {self.sp_config.instrument_model}")
+
+        self._populate_grating_combobox()
+        self.mono = create_spectrometer(self.sp_config, force_mock=self.force_mock)
+        self.camera = create_camera(self.sp_config, force_mock=self.force_mock)
+        self._connect_hardware_async()
+
     def _open_properties_dialog(self):
         PropertiesDialog(self)
 
@@ -1257,7 +1317,11 @@ class RubyDialog(tk.Toplevel):
             messagebox.showerror("Error", "Invalid numeric values.")
 
 
-def launch_vb_gui(config_path: Optional[str] = None, force_mock: bool = False):
+def launch_vb_gui(
+    config_path: Optional[str] = None,
+    force_mock: bool = False,
+    config: Optional[SpectrometerConfig] = None
+):
     """Launch the authentic VB-styled application."""
-    app = VBFormApp(config_path=config_path, force_mock=force_mock)
+    app = VBFormApp(config_path=config_path, force_mock=force_mock, config=config)
     app.mainloop()

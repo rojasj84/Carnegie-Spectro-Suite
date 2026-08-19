@@ -33,7 +33,12 @@ ctk.set_default_color_theme("blue")
 class HoribaApp(ctk.CTk):
     """Main application window for Spectrometer & Detector control."""
 
-    def __init__(self, config_path: Optional[str] = None, force_mock: bool = False):
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        force_mock: bool = False,
+        config: Optional[SpectrometerConfig] = None
+    ):
         super().__init__()
 
         self.title("Spectrometer & Detector Control Suite")
@@ -41,14 +46,18 @@ class HoribaApp(ctk.CTk):
         self.minsize(1050, 700)
 
         # Load Configuration
-        self.config_path = config_path or self._find_default_config()
-        if self.config_path and os.path.exists(self.config_path):
-            if self.config_path.endswith(".json"):
-                self.config = SpectrometerConfig.from_json(self.config_path)
-            else:
-                self.config = SpectrometerConfig.from_legacy_cfg(self.config_path)
+        if config is not None:
+            self.config = config
+            self.config_path = config_path
         else:
-            self.config = SpectrometerConfig()
+            self.config_path = config_path or self._find_default_config()
+            if self.config_path and os.path.exists(self.config_path):
+                if self.config_path.endswith(".json"):
+                    self.config = SpectrometerConfig.from_json(self.config_path)
+                else:
+                    self.config = SpectrometerConfig.from_legacy_cfg(self.config_path)
+            else:
+                self.config = SpectrometerConfig()
 
         self.calibration = OpticalCalibration(self.config.active_grating, self.config.num_pixels)
         self.force_mock = force_mock
@@ -72,7 +81,7 @@ class HoribaApp(ctk.CTk):
         self._connect_hardware_async()
 
     def _find_default_config(self) -> Optional[str]:
-        candidates = ["Wsp-460.cfg", "DEFAULT.CFG", "wsp-460.cfg"]
+        candidates = ["config_acton_sp2150.json", "Wsp-460.cfg", "DEFAULT.CFG", "wsp-460.cfg"]
         for c in candidates:
             if os.path.exists(c):
                 return c
@@ -648,7 +657,11 @@ class HoribaApp(ctk.CTk):
         ctk.CTkButton(dialog, text="Start Stitched Scan", command=_do_stitch).pack(pady=15)
 
 
-def launch_gui(config_path: Optional[str] = None, force_mock: bool = False):
+def launch_gui(
+    config_path: Optional[str] = None,
+    force_mock: bool = False,
+    config: Optional[SpectrometerConfig] = None
+):
     """Entry point to launch the graphical user interface."""
-    app = HoribaApp(config_path=config_path, force_mock=force_mock)
+    app = HoribaApp(config_path=config_path, force_mock=force_mock, config=config)
     app.mainloop()

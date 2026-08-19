@@ -47,11 +47,19 @@ class TestCameraFactory(unittest.TestCase):
         self.assertIsInstance(cam, MockCamera)
         self.assertEqual(cam.num_pixels, cfg.num_pixels)
 
+    def test_pimte_camera(self):
+        from horiba_hr460.hardware.pimte import PIMTECamera
+        cfg = SpectrometerConfig(camera_model="PI MTE USB Camera")
+        cam = create_camera(cfg, force_mock=False)
+        self.assertIsInstance(cam, PIMTECamera)
+        self.assertEqual(cam.num_pixels, cfg.num_pixels)
+
     def test_winspec_camera_fallback(self):
         cfg = SpectrometerConfig(camera_model="WINSPEC")
         cam = create_camera(cfg, force_mock=False)
         # Should instantiate WinSpecController if COM is available, or fallback to MockCamera
         self.assertTrue(isinstance(cam, (WinSpecController, MockCamera)))
+
 
 
 

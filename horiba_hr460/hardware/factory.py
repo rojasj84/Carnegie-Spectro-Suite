@@ -11,6 +11,7 @@ from .base import Spectrometer, Camera
 from .hr460 import HoribaHR460, MockHoribaHR460
 from .acton import ActonSpectrometer, MockActonSpectrometer
 from .camera import MockCamera
+from .pimte import PIMTECamera
 
 
 def create_spectrometer(config: SpectrometerConfig, force_mock: bool = False) -> Spectrometer:
@@ -28,14 +29,17 @@ def create_spectrometer(config: SpectrometerConfig, force_mock: bool = False) ->
 def create_camera(config: SpectrometerConfig, force_mock: bool = False) -> Camera:
     """
     Instantiate the Camera/Detector driver named by config.camera_model.
-    Supports Simulated/Mock cameras and optional vendor backends (e.g., WinSpec, Andor, etc.).
+    Supports PI MTE USB Camera, simulated detectors, and extensible camera drivers.
     """
     if force_mock:
         return MockCamera(config.num_pixels)
 
     cam_model = getattr(config, "camera_model", "SIMULATED").upper()
 
-    if cam_model == "WINSPEC":
+    if any(k in cam_model for k in ("MTE", "PRINCETON", "PIMTE", "PIXIS", "PICAM")):
+        return PIMTECamera(num_pixels=config.num_pixels)
+
+    if "WINSPEC" in cam_model:
         try:
             from .winspec import WinSpecController
             return WinSpecController(config.spe_data_path)

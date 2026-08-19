@@ -26,6 +26,7 @@ def main():
     gui_parser.add_argument("--config", "-c", default=None, help="Path to configuration file (.cfg / .json)")
     gui_parser.add_argument("--mock", "-m", action="store_true", help="Force simulation mode")
     gui_parser.add_argument("--modern", action="store_true", help="Launch modern dark-theme GUI instead of classic VB form")
+    gui_parser.add_argument("--setup", "--select", action="store_true", help="Open instrument and detector setup dialog")
 
     # Command: spe2dat
     spe_parser = subparsers.add_parser("spe2dat", help="Convert Princeton Instruments SPE to 2-column ASCII")
@@ -55,12 +56,51 @@ def main():
     args = parser.parse_args()
 
     if args.command == "gui" or args.command is None:
-        if getattr(args, "modern", False):
+        from .core.profiles import load_app_settings
+        from .gui.device_selector import DeviceSelectorDialog
+
+        config_arg = getattr(args, "config", None)
+        force_mock = getattr(args, "mock", False)
+        force_setup = getattr(args, "setup", False)
+        use_modern = getattr(args, "modern", False)
+
+        chosen_config = None
+
+        if config_arg:
+            if config_arg.endswith(".json"):
+                chosen_config = SpectrometerConfig.from_json(config_arg)
+            else:
+                chosen_config = SpectrometerConfig.from_legacy_cfg(config_arg)
+        elif not force_mock:
+            settings = load_app_settings()
+            remembered = settings.get("remember_choice", False)
+            saved_cfg_dict = settings.get("saved_config", None)
+
+            if not force_setup and remembered and saved_cfg_dict:
+                try:
+                    chosen_config = SpectrometerConfig.from_dict(saved_cfg_dict)
+                except Exception:
+                    chosen_config = None
+
+            if chosen_config is None or force_setup:
+                # Prompt startup selector dialog
+                selector = DeviceSelectorDialog()
+                action, sel_cfg, is_mock = selector.show()
+                if action == "CANCEL":
+                    sys.exit(0)
+                elif action == "DEMO":
+                    force_mock = True
+                    chosen_config = sel_cfg
+                else:
+                    chosen_config = sel_cfg
+                    force_mock = is_mock
+
+        if use_modern:
             from .gui.app import launch_gui
-            launch_gui(config_path=getattr(args, "config", None), force_mock=getattr(args, "mock", False))
+            launch_gui(config_path=config_arg, force_mock=force_mock, config=chosen_config)
         else:
             from .gui.vb_app import launch_vb_gui
-            launch_vb_gui(config_path=getattr(args, "config", None), force_mock=getattr(args, "mock", False))
+            launch_vb_gui(config_path=config_arg, force_mock=force_mock, config=chosen_config)
 
     elif args.command == "spe2dat":
         spe = read_spe(args.input_spe)
