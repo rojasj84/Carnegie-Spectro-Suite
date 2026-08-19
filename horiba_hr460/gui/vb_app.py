@@ -25,8 +25,8 @@ from ..core.calibration import OpticalCalibration, Units, ruby_pressure
 from ..core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
 from ..core.stitcher import SpectrumStitcher, StitchInterval
 from ..core.spe_file import read_spe, write_spe, SpeFile
-from ..hardware.hr460 import HoribaHR460, MockHoribaHR460, MonochromatorStatus
-from ..hardware.winspec import WinSpecController, MockWinSpecCamera
+from ..hardware.base import MonochromatorStatus
+from ..hardware.factory import create_spectrometer, create_camera
 
 
 class VBFormApp(tk.Tk):
@@ -63,12 +63,8 @@ class VBFormApp(tk.Tk):
         self.force_mock = force_mock
 
         # Initialize Hardware Drivers
-        if self.force_mock:
-            self.mono = MockHoribaHR460(self.sp_config)
-            self.camera = MockWinSpecCamera(self.sp_config.num_pixels)
-        else:
-            self.mono = HoribaHR460(port=self.sp_config.com_port, baudrate=self.sp_config.baudrate, config=self.sp_config)
-            self.camera = WinSpecController(self.sp_config.spe_data_path)
+        self.mono = create_spectrometer(self.sp_config, force_mock=self.force_mock)
+        self.camera = create_camera(self.sp_config, force_mock=self.force_mock)
 
         # Data & State Variables
         self.current_raw_wavelengths = self.calibration.get_pixel_wavelengths(
@@ -431,7 +427,7 @@ class VBFormApp(tk.Tk):
             mono_ok = self.mono.connect()
             cam_ok = self.camera.connect()
             if not cam_ok and not self.force_mock:
-                self.camera = MockWinSpecCamera(self.sp_config.num_pixels)
+                self.camera = create_camera(self.sp_config, force_mock=True)
                 self.camera.connect()
 
             self.after(0, self._on_connect_done)
@@ -439,7 +435,7 @@ class VBFormApp(tk.Tk):
         threading.Thread(target=_task, daemon=True).start()
 
     def _on_connect_done(self):
-        if self.mono.status == MonochromatorStatus.DEMO_MODE or isinstance(self.camera, MockWinSpecCamera):
+        if self.mono.status == MonochromatorStatus.DEMO_MODE or self.camera.is_mock:
             self.lbl_conn_indicator.config(text="● DEMO MODE", fg="#CC8800")
             if "DEMO MODE" not in self.title():
                 self.title(self.title() + "      DEMO MODE")
@@ -615,10 +611,7 @@ class VBFormApp(tk.Tk):
                 def _prog(tl):
                     self.after(0, lambda: self.sbr_time.config(text=f"Time Left: {tl:.1f}s"))
 
-                if isinstance(self.camera, MockWinSpecCamera):
-                    data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
-                else:
-                    data, _ = self.camera.acquire_frame(exp_time, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
+                data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
 
                 self.current_spectrum = data
                 self.after(0, self._refresh_plot)
@@ -655,10 +648,7 @@ class VBFormApp(tk.Tk):
                     def _prog(tl):
                         self.after(0, lambda: self.sbr_time.config(text=f"Time Left: {tl:.1f}s ({a}/{n_acc})"))
 
-                    if isinstance(self.camera, MockWinSpecCamera):
-                        data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
-                    else:
-                        data, _ = self.camera.acquire_frame(exp_time, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
+                    data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
 
                     frames.append(data)
 
@@ -702,10 +692,7 @@ class VBFormApp(tk.Tk):
             while self.focus_running:
                 try:
                     wls = self.calibration.get_pixel_wavelengths(self.mono.current_wavelength_nm, self.sp_config.num_pixels)
-                    if isinstance(self.camera, MockWinSpecCamera):
-                        data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, stop_requested=lambda: not self.focus_running)
-                    else:
-                        data, _ = self.camera.acquire_frame(exp_time, stop_requested=lambda: not self.focus_running)
+                    data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, stop_requested=lambda: not self.focus_running)
                     self.current_spectrum = data
                     self.after(0, self._refresh_plot)
                 except Exception:
@@ -787,12 +774,8 @@ class VBFormApp(tk.Tk):
 
     def _toggle_simulation_mode(self):
         self.force_mock = self.var_sim_mode.get()
-        if self.force_mock:
-            self.mono = MockHoribaHR460(self.sp_config)
-            self.camera = MockWinSpecCamera(self.sp_config.num_pixels)
-        else:
-            self.mono = HoribaHR460(port=self.sp_config.com_port, baudrate=self.sp_config.baudrate, config=self.sp_config)
-            self.camera = WinSpecController(self.sp_config.spe_data_path)
+        self.mono = create_spectrometer(self.sp_config, force_mock=self.force_mock)
+        self.camera = create_camera(self.sp_config, force_mock=self.force_mock)
         self._connect_hardware_async()
 
     # =========================================================================
@@ -808,7 +791,14 @@ class VBFormApp(tk.Tk):
 
         x = self.calibration.convert_wavelengths_to_units(self.current_raw_wavelengths, self.current_unit)
         if path.endswith(".spe"):
-            write_spe(path, self.current_spectrum, float(self.txt_time.get()))
+            g = self.sp_config.active_grating
+            write_spe(
+                path, self.current_spectrum, float(self.txt_time.get()),
+                wavelengths_nm=self.current_raw_wavelengths,
+                center_wavelength_nm=self.mono.current_wavelength_nm,
+                grating_grooves_per_mm=g.grating_grooves_per_mm,
+                laser_wavelength_nm=g.laser_wavelength,
+            )
         else:
             header = f"Laser: {self.sp_config.active_grating.laser_wavelength:.3f} nm, Center: {self.mono.current_wavelength_nm:.3f} nm\n{self.current_unit.value}\tIntensity"
             np.savetxt(path, np.column_stack((x, self.current_spectrum)), fmt="%.6f\t%.4f", header=header)
@@ -1162,10 +1152,7 @@ class GlueDialog(tk.Toplevel):
                 self.parent.mono.move_to_wavelength(item.center_wavelength_nm)
                 
                 wls = self.parent.calibration.get_pixel_wavelengths(item.center_wavelength_nm, self.parent.sp_config.num_pixels)
-                if isinstance(self.parent.camera, MockWinSpecCamera):
-                    data, _ = self.parent.camera.acquire_frame(exp_t, wavelengths_nm=wls)
-                else:
-                    data, _ = self.parent.camera.acquire_frame(exp_t)
+                data, _ = self.parent.camera.acquire_frame(exp_t, wavelengths_nm=wls)
 
                 w_wins.append(wls)
                 i_wins.append(data)

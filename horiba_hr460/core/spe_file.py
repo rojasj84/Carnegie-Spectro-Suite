@@ -1,12 +1,20 @@
 """
-Princeton Instruments SPE Binary File Reader & Writer (SPE 2.x / 3.x).
+Princeton Instruments SPE Binary File Reader & Writer (WinSpec/WinView SPE 2.x format).
+
+Byte offsets below are the verified WinSpec SPE 2.5 header layout (cross-checked against
+the pyWinSpec and libspe reference implementations, and against a real WinSpec-exported
+sample file in this repo, HR460-PICCD/q.spe) -- not the same offsets an earlier version of
+this module used, which were internally self-consistent but did not match real WinSpec
+files. See core/spe_file.py history / PR notes for the offset corrections.
 """
 
 from __future__ import annotations
 import struct
 import os
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, Tuple
+import math
+from datetime import datetime
+from dataclasses import dataclass
+from typing import Optional
 import numpy as np
 
 
@@ -17,6 +25,41 @@ SPE_DATA_TYPES = {
     3: (np.uint16, 2, "H"),
     8: (np.uint32, 4, "I"),
 }
+
+# Header field offsets (WinSpec SPE 2.5 spec).
+_OFFSET_EXP_SEC = 10
+_OFFSET_DATE = 20
+_OFFSET_SPEC_CENTER_WL_NM = 72
+_OFFSET_XDIM = 42
+_OFFSET_DATATYPE = 108
+_OFFSET_SPEC_GROOVES = 650
+_OFFSET_YDIM = 656
+_OFFSET_NUM_FRAMES = 1446
+_OFFSET_FILE_HEADER_VER = 1992
+_OFFSET_XCALIB = 3000
+
+# Offsets within the 489-byte AxisCalibration block (relative to _OFFSET_XCALIB).
+_XCAL_OFFSET = 0            # double
+_XCAL_FACTOR = 8             # double
+_XCAL_CURRENT_UNIT = 16      # char
+_XCAL_STRING = 18            # char[40]
+_XCAL_VALID = 98             # char (bool)
+_XCAL_INPUT_UNIT = 99        # char
+_XCAL_POLYNOM_UNIT = 100     # char
+_XCAL_POLYNOM_ORDER = 101    # char
+_XCAL_CALIB_COUNT = 102      # char
+_XCAL_PIXEL_POSITION = 103   # double[10]
+_XCAL_CALIB_VALUE = 183      # double[10]
+_XCAL_POLYNOM_COEFF = 263    # double[6]
+_XCAL_LASER_POSITION = 311   # double
+_XCAL_CALIB_LABEL = 321      # char[81]
+
+# The "scaling unit" byte codes (current_unit/input_unit/polynom_unit) are not published in
+# any WinSpec documentation we could find; this is the value observed in a real WinSpec-
+# exported file (HR460-PICCD/q.spe) with an active polynomial calibration. It only affects
+# which label WinSpec's UI shows for the axis -- the actual calibrated values come from
+# polynom_coeff/polynom_order below, which are documented and verified.
+_XCAL_UNIT_CODE_BEST_EFFORT = 1
 
 
 @dataclass
@@ -39,7 +82,7 @@ class SpeFile:
         """Export spectrum as 2-column ASCII text file."""
         x = x_axis if x_axis is not None else (self.wavelengths if self.wavelengths is not None else np.arange(1, len(self.data.flat) + 1))
         y = np.ravel(self.data)
-        
+
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(f"# Exported Spectrum from SPE\n")
             f.write(f"# Exposure: {self.exposure_time:.3f} s, Frames: {self.num_frames}\n")
@@ -59,26 +102,37 @@ def read_spe(filepath: str) -> SpeFile:
         if len(header) < 4100:
             raise ValueError(f"File {filepath} is smaller than 4100 bytes (invalid SPE file).")
 
-        # Datatype at offset 42 (short)
-        datatype = struct.unpack_from("<h", header, 42)[0]
-        # xdim at offset 656 (ushort)
-        xdim = struct.unpack_from("<H", header, 656)[0]
-        # ydim at offset 658 (ushort)
-        ydim = struct.unpack_from("<H", header, 658)[0]
-        # num_frames at offset 1446 (long)
-        num_frames = struct.unpack_from("<l", header, 1446)[0]
+        datatype = struct.unpack_from("<h", header, _OFFSET_DATATYPE)[0]
+        xdim = struct.unpack_from("<H", header, _OFFSET_XDIM)[0]
+        ydim = struct.unpack_from("<H", header, _OFFSET_YDIM)[0]
+        num_frames = struct.unpack_from("<l", header, _OFFSET_NUM_FRAMES)[0]
         if num_frames <= 0:
             num_frames = 1
 
-        # Exposure time at offset 10 (float)
-        exp_time = struct.unpack_from("<f", header, 10)[0]
-        # Date string at offset 20 (10 bytes)
-        date_raw = header[20:30].decode("ascii", errors="ignore").strip("\x00")
+        exp_time = struct.unpack_from("<f", header, _OFFSET_EXP_SEC)[0]
+        date_raw = header[_OFFSET_DATE:_OFFSET_DATE + 10].decode("ascii", errors="ignore").strip("\x00")
 
-        # Laser wavelength / calib at offset 3100 (float) if present
-        laser_wl = struct.unpack_from("<d", header, 688)[0] if len(header) >= 696 else 514.532
-        if math_is_invalid(laser_wl) or laser_wl <= 0 or laser_wl > 5000:
-            laser_wl = 514.532
+        center_wavelength = struct.unpack_from("<f", header, _OFFSET_SPEC_CENTER_WL_NM)[0]
+        grating_grooves = struct.unpack_from("<f", header, _OFFSET_SPEC_GROOVES)[0]
+        if _is_invalid(center_wavelength):
+            center_wavelength = 0.0
+        if _is_invalid(grating_grooves):
+            grating_grooves = 0.0
+
+        calib_valid = struct.unpack_from("<b", header, _OFFSET_XCALIB + _XCAL_VALID)[0]
+        wavelengths = None
+        laser_wavelength = 514.532
+        if calib_valid:
+            order = struct.unpack_from("<b", header, _OFFSET_XCALIB + _XCAL_POLYNOM_ORDER)[0]
+            order = max(0, min(order, 5))
+            coeffs_ascending = struct.unpack_from("<6d", header, _OFFSET_XCALIB + _XCAL_POLYNOM_COEFF)
+            coeffs_descending = list(coeffs_ascending[:order + 1])[::-1]  # np.polyval wants highest power first
+            pixels = np.arange(1, xdim + 1)
+            wavelengths = np.polyval(coeffs_descending, pixels)
+
+            laser_pos = struct.unpack_from("<d", header, _OFFSET_XCALIB + _XCAL_LASER_POSITION)[0]
+            if not _is_invalid(laser_pos) and laser_pos > 0:
+                laser_wavelength = laser_pos
 
         dtype_info = SPE_DATA_TYPES.get(datatype, (np.float32, 4, "f"))
         dtype, itemsize, _ = dtype_info
@@ -103,12 +157,30 @@ def read_spe(filepath: str) -> SpeFile:
             datatype=datatype,
             exposure_time=exp_time,
             date_str=date_raw,
-            laser_wavelength=laser_wl
+            laser_wavelength=laser_wavelength,
+            center_wavelength=center_wavelength,
+            grating_grooves=grating_grooves,
+            wavelengths=wavelengths,
         )
 
 
-def write_spe(filepath: str, data: np.ndarray, exposure_time: float = 1.0) -> None:
-    """Write 1D or 2D numpy array into a standard Princeton Instruments SPE 2.x file."""
+def write_spe(
+    filepath: str,
+    data: np.ndarray,
+    exposure_time: float = 1.0,
+    wavelengths_nm: Optional[np.ndarray] = None,
+    center_wavelength_nm: float = 0.0,
+    grating_grooves_per_mm: float = 0.0,
+    laser_wavelength_nm: float = 0.0,
+    date_str: Optional[str] = None,
+) -> None:
+    """
+    Write 1D or 2D numpy array into a WinSpec-compatible SPE 2.x file.
+
+    If wavelengths_nm is provided (one value per x-pixel), it is fit with a polynomial
+    (degree capped at 5, the format's limit) and stored in the file's X-axis calibration
+    block so WinSpec/WinView shows the correct wavelength axis rather than raw pixel number.
+    """
     arr = np.asarray(data, dtype=np.float32)
     if arr.ndim == 1:
         num_frames, ydim, xdim = 1, 1, arr.shape[0]
@@ -120,25 +192,56 @@ def write_spe(filepath: str, data: np.ndarray, exposure_time: float = 1.0) -> No
         raise ValueError(f"Unsupported array dimension: {arr.ndim}")
 
     header = bytearray(4100)
-    # Datatype = 0 (float32)
-    struct.pack_into("<h", header, 42, 0)
-    # xdim
-    struct.pack_into("<H", header, 656, xdim)
-    # ydim
-    struct.pack_into("<H", header, 658, ydim)
-    # num_frames
-    struct.pack_into("<l", header, 1446, num_frames)
-    # exposure time
-    struct.pack_into("<f", header, 10, float(exposure_time))
-    # version (e.g. 2.5)
-    struct.pack_into("<f", header, 3100, 2.5)
+    struct.pack_into("<h", header, _OFFSET_DATATYPE, 0)  # float32
+    struct.pack_into("<H", header, _OFFSET_XDIM, xdim)
+    struct.pack_into("<H", header, _OFFSET_YDIM, ydim)
+    struct.pack_into("<l", header, _OFFSET_NUM_FRAMES, num_frames)
+    struct.pack_into("<f", header, _OFFSET_EXP_SEC, float(exposure_time))
+    struct.pack_into("<f", header, _OFFSET_FILE_HEADER_VER, 2.5)
+    struct.pack_into("<f", header, _OFFSET_SPEC_CENTER_WL_NM, float(center_wavelength_nm))
+    struct.pack_into("<f", header, _OFFSET_SPEC_GROOVES, float(grating_grooves_per_mm))
+
+    date_text = (date_str or datetime.now().strftime("%d%b%Y")).encode("ascii", errors="ignore")[:10]
+    header[_OFFSET_DATE:_OFFSET_DATE + len(date_text)] = date_text
+
+    if wavelengths_nm is not None and len(wavelengths_nm) >= 2:
+        _write_xcalibration(header, np.asarray(wavelengths_nm, dtype=np.float64), laser_wavelength_nm)
 
     with open(filepath, "wb") as f:
         f.write(header)
         f.write(arr.tobytes())
 
 
-def math_is_invalid(val: float) -> bool:
+def _write_xcalibration(header: bytearray, wavelengths_nm: np.ndarray, laser_wavelength_nm: float) -> None:
+    xcal = _OFFSET_XCALIB
+    order = min(5, len(wavelengths_nm) - 1)
+    pixels = np.arange(1, len(wavelengths_nm) + 1)
+    coeffs_descending = np.polyfit(pixels, wavelengths_nm, order)
+    coeffs_ascending = coeffs_descending[::-1]
+
+    poly_coeff = [0.0] * 6
+    poly_coeff[: order + 1] = coeffs_ascending.tolist()
+
+    struct.pack_into("<d", header, xcal + _XCAL_OFFSET, 0.0)
+    struct.pack_into("<d", header, xcal + _XCAL_FACTOR, 0.0)
+    struct.pack_into("<b", header, xcal + _XCAL_CURRENT_UNIT, _XCAL_UNIT_CODE_BEST_EFFORT)
+    _pack_string(header, xcal + _XCAL_STRING, "Wavelength", 40)
+    struct.pack_into("<b", header, xcal + _XCAL_VALID, 1)
+    struct.pack_into("<b", header, xcal + _XCAL_INPUT_UNIT, 0)
+    struct.pack_into("<b", header, xcal + _XCAL_POLYNOM_UNIT, _XCAL_UNIT_CODE_BEST_EFFORT)
+    struct.pack_into("<b", header, xcal + _XCAL_POLYNOM_ORDER, order)
+    struct.pack_into("<b", header, xcal + _XCAL_CALIB_COUNT, 0)
+    for i, coeff in enumerate(poly_coeff):
+        struct.pack_into("<d", header, xcal + _XCAL_POLYNOM_COEFF + i * 8, coeff)
+    struct.pack_into("<d", header, xcal + _XCAL_LASER_POSITION, float(laser_wavelength_nm))
+    _pack_string(header, xcal + _XCAL_CALIB_LABEL, "Wavelength (nm)", 81)
+
+
+def _pack_string(header: bytearray, offset: int, text: str, max_len: int) -> None:
+    raw = text.encode("ascii", errors="ignore")[:max_len]
+    header[offset:offset + len(raw)] = raw
+
+
+def _is_invalid(val: float) -> bool:
     """Check if float is NaN or infinite."""
-    import math
     return math.isnan(val) or math.isinf(val)

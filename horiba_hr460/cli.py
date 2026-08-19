@@ -12,8 +12,7 @@ from .config import SpectrometerConfig
 from .core.calibration import OpticalCalibration, Units
 from .core.spe_file import read_spe, write_spe
 from .core.stitcher import SpectrumStitcher
-from .hardware.hr460 import HoribaHR460, MockHoribaHR460
-from .hardware.winspec import WinSpecController, MockWinSpecCamera
+from .hardware.factory import create_spectrometer, create_camera
 
 
 def main():
@@ -50,6 +49,7 @@ def main():
     move_parser.add_argument("--slit", "-s", type=float, help="Slit size in microns")
     move_parser.add_argument("--grating", "-g", type=int, choices=[0, 1], help="Grating index (0 or 1)")
     move_parser.add_argument("--port", "-p", default="COM1", help="Serial COM port")
+    move_parser.add_argument("--model", choices=["HR460", "ACTON"], default="HR460", help="Spectrometer model")
     move_parser.add_argument("--mock", "-m", action="store_true", help="Use simulated hardware")
 
     args = parser.parse_args()
@@ -97,18 +97,16 @@ def main():
         cal = OpticalCalibration(g, cfg.num_pixels)
         wls = cal.get_pixel_wavelengths()
 
-        if args.mock:
-            cam = MockWinSpecCamera(cfg.num_pixels)
-        else:
-            cam = WinSpecController()
-            if not cam.connect():
-                print("Could not connect to WinSpec32 COM, falling back to mock camera.")
-                cam = MockWinSpecCamera(cfg.num_pixels)
+        cam = create_camera(cfg, force_mock=args.mock)
+        if not cam.connect() and not args.mock:
+            print("Could not connect to WinSpec32 COM, falling back to mock camera.")
+            cam = create_camera(cfg, force_mock=True)
+            cam.connect()
 
         print(f"Acquiring spectrum ({args.exposure}s exposure, {args.accum} accumulations)...")
         accum_data = []
         for a in range(args.accum):
-            data, _ = cam.acquire_frame(args.exposure, wavelengths_nm=wls if isinstance(cam, MockWinSpecCamera) else None)
+            data, _ = cam.acquire_frame(args.exposure, wavelengths_nm=wls)
             accum_data.append(data)
         
         final_y = np.mean(accum_data, axis=0)
@@ -116,9 +114,10 @@ def main():
         print(f"Spectrum saved to {args.output}")
 
     elif args.command == "move":
-        mono = MockHoribaHR460() if args.mock else HoribaHR460(port=args.port)
+        cfg = SpectrometerConfig(com_port=args.port, instrument_model=args.model)
+        mono = create_spectrometer(cfg, force_mock=args.mock)
         if not mono.connect():
-            print("Failed to connect to HR460.")
+            print(f"Failed to connect to {args.model} on {args.port}.")
             sys.exit(1)
         
         if args.wavelength is not None:

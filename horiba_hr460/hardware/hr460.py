@@ -5,23 +5,13 @@ Horiba Jobin Yvon HR460 Monochromator Serial Driver & Mock Simulator.
 from __future__ import annotations
 import time
 import logging
-from enum import Enum
 from typing import Optional, Callable, Tuple
 import serial
 
 from ..config import SpectrometerConfig, GratingConfig
+from .base import MonochromatorStatus
 
 logger = logging.getLogger("horiba_hr460")
-
-
-class MonochromatorStatus(str, Enum):
-    DISCONNECTED = "Disconnected"
-    CONNECTING = "Connecting"
-    READY = "Ready"
-    MOVING = "Moving"
-    CHANGING_GRATING = "Changing Grating"
-    ERROR = "Error"
-    DEMO_MODE = "Demo Mode (Mock)"
 
 
 class HoribaHR460:

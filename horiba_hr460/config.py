@@ -51,7 +51,8 @@ class SpectrometerConfig:
     ])
     active_grating_index: int = 0          # 0 for Grating 1, 1 for Grating 2
     num_pixels: int = 1024                 # Detector pixel count (e.g., 1024, 1340, 1400)
-    com_port: str = "COM1"                 # Serial COM port for HR460 controller
+    instrument_model: str = "HR460"        # Spectrometer driver to use: "HR460" or "ACTON"
+    com_port: str = "COM1"                 # Serial COM port for the spectrometer controller
     baudrate: int = 9600                   # Serial baudrate
     spe_data_path: str = "calib.spe"       # Path for temporary SPE acquisition transfer
     labels: list[str] = field(default_factory=lambda: list(DEFAULT_LABELS))
@@ -168,6 +169,7 @@ class SpectrometerConfig:
         return {
             "active_grating_index": self.active_grating_index,
             "num_pixels": self.num_pixels,
+            "instrument_model": self.instrument_model,
             "com_port": self.com_port,
             "baudrate": self.baudrate,
             "spe_data_path": self.spe_data_path,
@@ -202,6 +204,7 @@ class SpectrometerConfig:
             gratings=gratings,
             active_grating_index=data.get("active_grating_index", 0),
             num_pixels=data.get("num_pixels", 1024),
+            instrument_model=data.get("instrument_model", "HR460"),
             com_port=data.get("com_port", "COM1"),
             baudrate=data.get("baudrate", 9600),
             spe_data_path=data.get("spe_data_path", "calib.spe"),

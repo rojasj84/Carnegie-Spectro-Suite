@@ -24,7 +24,11 @@ DM_ROI_ENDY = 6
 class WinSpecController:
     """
     Automates Princeton Instruments WinSpec32 software via Windows COM / ActiveX.
+    Camera-agnostic: works with any detector WinSpec32/WinView32 has configured as the
+    active experiment (e.g. Horiba CCDs, Princeton Instruments PIXIS cameras).
     """
+
+    is_mock = False
 
     def __init__(self, temp_spe_path: str = "calib.spe"):
         self.temp_spe_path = os.path.abspath(temp_spe_path)
@@ -49,12 +53,16 @@ class WinSpecController:
     def acquire_frame(
         self,
         exposure_time_sec: float = 1.0,
+        wavelengths_nm: Optional[np.ndarray] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
         stop_requested: Optional[Callable[[], bool]] = None
     ) -> Tuple[np.ndarray, int]:
         """
         Trigger an acquisition in WinSpec, wait for exposure completion,
         and retrieve the CCD frame data as a 1D/2D numpy array.
+
+        wavelengths_nm is accepted for interface parity with MockWinSpecCamera
+        (real hardware reports its own pixel axis via WinSpec) and is unused here.
         """
         if not self.is_connected or not self.exp_setup:
             raise RuntimeError("WinSpec COM interface is not connected.")
@@ -95,6 +103,8 @@ class MockWinSpecCamera:
     Simulated CCD detector for testing without physical WinSpec32 / camera hardware.
     Generates synthetic emission lines (Neon & Ruby R1/R2) convolved with instrument response.
     """
+
+    is_mock = True
 
     def __init__(self, num_pixels: int = 1024):
         self.num_pixels = num_pixels

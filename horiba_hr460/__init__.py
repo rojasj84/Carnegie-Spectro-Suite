@@ -11,7 +11,9 @@ from .core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_media
 from .core.stitcher import SpectrumStitcher, StitchInterval
 from .core.spe_file import read_spe, write_spe, SpeFile
 from .hardware.hr460 import HoribaHR460, MockHoribaHR460
+from .hardware.acton import ActonSpectrometer, MockActonSpectrometer
 from .hardware.winspec import WinSpecController, MockWinSpecCamera
+from .hardware.factory import create_spectrometer, create_camera
 
 __version__ = "1.0.0"
 __all__ = [
@@ -28,6 +30,10 @@ __all__ = [
     "SpeFile",
     "HoribaHR460",
     "MockHoribaHR460",
+    "ActonSpectrometer",
+    "MockActonSpectrometer",
     "WinSpecController",
     "MockWinSpecCamera",
+    "create_spectrometer",
+    "create_camera",
 ]

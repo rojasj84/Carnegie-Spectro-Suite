@@ -23,8 +23,8 @@ from ..core.calibration import OpticalCalibration, Units, ruby_pressure
 from ..core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
 from ..core.stitcher import SpectrumStitcher
 from ..core.spe_file import read_spe, write_spe
-from ..hardware.hr460 import HoribaHR460, MockHoribaHR460, MonochromatorStatus
-from ..hardware.winspec import WinSpecController, MockWinSpecCamera
+from ..hardware.base import MonochromatorStatus
+from ..hardware.factory import create_spectrometer, create_camera
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -54,12 +54,8 @@ class HoribaApp(ctk.CTk):
         self.force_mock = force_mock
 
         # Initialize Hardware Drivers
-        if self.force_mock:
-            self.mono = MockHoribaHR460(self.config)
-            self.camera = MockWinSpecCamera(self.config.num_pixels)
-        else:
-            self.mono = HoribaHR460(port=self.config.com_port, baudrate=self.config.baudrate, config=self.config)
-            self.camera = WinSpecController(self.config.spe_data_path)
+        self.mono = create_spectrometer(self.config, force_mock=self.force_mock)
+        self.camera = create_camera(self.config, force_mock=self.force_mock)
 
         # State Variables
         self.current_raw_wavelengths = self.calibration.get_pixel_wavelengths()
@@ -299,7 +295,7 @@ class HoribaApp(ctk.CTk):
             cam_ok = self.camera.connect()
             if not cam_ok and not self.force_mock:
                 # Fallback to simulated camera
-                self.camera = MockWinSpecCamera(self.config.num_pixels)
+                self.camera = create_camera(self.config, force_mock=True)
                 self.camera.connect()
 
             self.after(0, self._update_connection_status)
@@ -308,7 +304,7 @@ class HoribaApp(ctk.CTk):
 
     def _update_connection_status(self):
         self.status_hw.configure(text=f"Monochromator: {self.mono.status.value}")
-        cam_type = "Mock Simulated" if isinstance(self.camera, MockWinSpecCamera) else "WinSpec32 COM"
+        cam_type = "Mock Simulated" if self.camera.is_mock else "WinSpec32 COM"
         self.status_cam.configure(text=f"Camera: {cam_type}")
         self._refresh_plot()
 
@@ -423,10 +419,7 @@ class HoribaApp(ctk.CTk):
                     frac = 1.0 - (time_left / max(0.1, exp_time))
                     self.after(0, lambda: self.progress_bar.set(frac))
 
-                if isinstance(self.camera, MockWinSpecCamera):
-                    data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
-                else:
-                    data, _ = self.camera.acquire_frame(exp_time, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
+                data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
 
                 self.current_spectrum = data
                 self.after(0, self._refresh_plot)
@@ -461,10 +454,7 @@ class HoribaApp(ctk.CTk):
                         break
                     self.status_action.configure(text=f"Accumulation {a}/{n_acc}...")
                     
-                    if isinstance(self.camera, MockWinSpecCamera):
-                        data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, stop_requested=lambda: self.stop_requested)
-                    else:
-                        data, _ = self.camera.acquire_frame(exp_time, stop_requested=lambda: self.stop_requested)
+                    data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, stop_requested=lambda: self.stop_requested)
 
                     frames.append(data)
                     self.after(0, lambda: self.progress_bar.set(a / n_acc))
@@ -502,10 +492,7 @@ class HoribaApp(ctk.CTk):
             while self.focus_running:
                 try:
                     wls = self.calibration.get_pixel_wavelengths(self.mono.current_wavelength_nm, self.config.num_pixels)
-                    if isinstance(self.camera, MockWinSpecCamera):
-                        data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, stop_requested=lambda: not self.focus_running)
-                    else:
-                        data, _ = self.camera.acquire_frame(exp_time, stop_requested=lambda: not self.focus_running)
+                    data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, stop_requested=lambda: not self.focus_running)
                     self.current_spectrum = data
                     self.after(0, self._refresh_plot)
                 except Exception:
@@ -538,7 +525,14 @@ class HoribaApp(ctk.CTk):
 
         x = self.calibration.convert_wavelengths_to_units(self.current_raw_wavelengths, self.current_unit)
         if path.endswith(".spe"):
-            write_spe(path, self.current_spectrum, float(self.entry_exp.get()))
+            g = self.config.active_grating
+            write_spe(
+                path, self.current_spectrum, float(self.entry_exp.get()),
+                wavelengths_nm=self.current_raw_wavelengths,
+                center_wavelength_nm=self.mono.current_wavelength_nm,
+                grating_grooves_per_mm=g.grating_grooves_per_mm,
+                laser_wavelength_nm=g.laser_wavelength,
+            )
         else:
             np.savetxt(path, np.column_stack((x, self.current_spectrum)), fmt="%.6f\t%.4f", header=f"{self.current_unit.value}\tIntensity")
         self.status_action.configure(text=f"Saved to {os.path.basename(path)}")
@@ -611,10 +605,7 @@ class HoribaApp(ctk.CTk):
                 for item in intervals:
                     self.mono.move_to_wavelength(item.center_wavelength_nm)
                     wls = self.calibration.get_pixel_wavelengths(item.center_wavelength_nm, self.config.num_pixels)
-                    if isinstance(self.camera, MockWinSpecCamera):
-                        data, _ = self.camera.acquire_frame(exp_t, wavelengths_nm=wls)
-                    else:
-                        data, _ = self.camera.acquire_frame(exp_t)
+                    data, _ = self.camera.acquire_frame(exp_t, wavelengths_nm=wls)
                     w_windows.append(wls)
                     i_windows.append(data)
 

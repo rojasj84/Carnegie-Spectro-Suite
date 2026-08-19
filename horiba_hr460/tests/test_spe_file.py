@@ -21,10 +21,42 @@ class TestSpeFile(unittest.TestCase):
             self.skipTest(f"Sample SPE not found at {self.sample_spe}")
 
         spe = read_spe(self.sample_spe)
-        self.assertGreater(spe.xdim, 0)
-        self.assertGreater(spe.num_frames, 0)
+        # Ground-truth values for HR460-PICCD/q.spe, verified directly against the raw
+        # header bytes at the correct offsets (xdim=42, ydim=656, datatype=108, date=20).
+        self.assertEqual(spe.xdim, 1152)
+        self.assertEqual(spe.ydim, 1)
+        self.assertEqual(spe.num_frames, 1)
+        self.assertEqual(spe.date_str, "08Oct2004")
         self.assertIsNotNone(spe.data)
         self.assertEqual(len(spe.data.flat), spe.xdim * spe.ydim * spe.num_frames)
+
+    def test_write_with_wavelength_calibration_roundtrip(self):
+        n_pix = 256
+        pixels = np.arange(1, n_pix + 1)
+        # A synthetic but non-trivial dispersion curve (quadratic), like a real grating.
+        true_wavelengths = 600.0 + 0.05 * pixels + 1e-6 * pixels ** 2
+        test_data = np.random.default_rng(0).normal(100.0, 5.0, n_pix).astype(np.float32)
+
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".spe") as tmp:
+            tmp_path = tmp.name
+
+        try:
+            write_spe(
+                tmp_path, test_data, exposure_time=1.0,
+                wavelengths_nm=true_wavelengths,
+                center_wavelength_nm=700.0,
+                grating_grooves_per_mm=1800.0,
+                laser_wavelength_nm=514.532,
+            )
+            spe = read_spe(tmp_path)
+            self.assertIsNotNone(spe.wavelengths)
+            np.testing.assert_allclose(spe.wavelengths, true_wavelengths, rtol=1e-3)
+            self.assertAlmostEqual(spe.center_wavelength, 700.0, places=1)
+            self.assertAlmostEqual(spe.grating_grooves, 1800.0, places=1)
+            self.assertAlmostEqual(spe.laser_wavelength, 514.532, places=2)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def test_write_and_read_roundtrip(self):
         test_data = np.linspace(100.0, 5000.0, 1024, dtype=np.float32)
