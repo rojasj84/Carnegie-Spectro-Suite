@@ -159,14 +159,18 @@ class VBFormApp(tk.Tk):
 
         # --- Spectrometer (Call) Menu ---
         call_menu = tk.Menu(menubar, tearoff=0)
-        call_menu.add_command(label="Initialize HR460 (Power-on Init)...", command=self._on_init_hardware)
+        call_menu.add_command(label=f"Model: {self.sp_config.instrument_model}", state="disabled")
+        self.mnu_spectrometer_model_index = 0
         call_menu.add_separator()
-        call_menu.add_command(label="Move HR460 Wavelength...", command=self._prompt_move_wavelength)
+        call_menu.add_command(label="Initialize Spectrometer (Power-on Init)...", command=self._on_init_hardware)
+        call_menu.add_separator()
+        call_menu.add_command(label="Move Wavelength...", command=self._prompt_move_wavelength)
         call_menu.add_command(label="Set Entrance Slit...", command=self._prompt_set_slit)
         call_menu.add_command(label="Select Grating Turret...", command=self._prompt_select_grating)
         call_menu.add_separator()
-        call_menu.add_command(label="Read Current Position (H0)", command=self._on_read_position)
-        call_menu.add_command(label="Read Entrance Slit (j0)", command=self._on_read_slit)
+        call_menu.add_command(label="Read Current Position", command=self._on_read_position)
+        call_menu.add_command(label="Read Entrance Slit", command=self._on_read_slit)
+        self.call_menu = call_menu
         menubar.add_cascade(label="Spectrometer", menu=call_menu)
 
         # --- Tools Menu ---
@@ -404,6 +408,9 @@ class VBFormApp(tk.Tk):
         self.statusbar = ttk.Frame(self, relief="sunken", borderwidth=1)
         self.statusbar.pack(side="bottom", fill="x")
 
+        self.sbr_model = ttk.Label(self.statusbar, text=f"Model: {self.sp_config.instrument_model}", relief="groove", padding=(4, 2), font=("Tahoma", 8, "bold"))
+        self.sbr_model.pack(side="left", padx=1)
+
         self.sbr_port = ttk.Label(self.statusbar, text=f"Port: {self.sp_config.com_port} {self.sp_config.baudrate},N,8,1", relief="groove", padding=(4, 2), font=("Tahoma", 8))
         self.sbr_port.pack(side="left", padx=1)
 
@@ -514,7 +521,7 @@ class VBFormApp(tk.Tk):
             return
 
         def _task():
-            self.sbr_status.config(text=f"Status: Moving HR460 to {target_nm:.2f} nm...")
+            self.sbr_status.config(text=f"Status: Moving to {target_nm:.2f} nm...")
             
             def _prog(pos):
                 self.after(0, lambda: self.sbr_pos.config(text=f"Position: {pos:.2f} nm"))
@@ -894,11 +901,12 @@ class VBFormApp(tk.Tk):
         )
 
     def _open_about_dialog(self):
+        g = self.sp_config.active_grating
         messagebox.showinfo(
-            "About HR460 / WinSpec32",
-            "HR460/WinSpec32 Spectrometer Interface\n"
+            "About WizSpec / WinSpec32",
+            "WizSpec/WinSpec32 Spectrometer Interface\n"
             "Modern Python Re-implementation of WizSpec (c) Viktor Struzhkin\n\n"
-            "Spectrometer: Horiba Jobin Yvon HR460 (Focal length 460 mm)\n"
+            f"Spectrometer: {self.sp_config.instrument_model} (Focal length {g.focal_length_mm:.0f} mm)\n"
             "Detector: Princeton Instruments CCD (WinSpec32 / SPE)\n"
             "Interface: RS-232 Monochromator Control & ActiveX/COM Detector Automation"
         )
@@ -916,7 +924,7 @@ class VBFormApp(tk.Tk):
             self.sp_config.active_grating.accumulations = val
 
     def _prompt_move_wavelength(self):
-        val = tk.simpledialog.askfloat("Move HR460", "Enter target center wavelength in nm:", initialvalue=self.mono.current_wavelength_nm)
+        val = tk.simpledialog.askfloat("Move Wavelength", "Enter target center wavelength in nm:", initialvalue=self.mono.current_wavelength_nm)
         if val is not None:
             self.pos_hr460.delete(0, "end")
             self.pos_hr460.insert(0, f"{val:.2f}")
@@ -943,7 +951,7 @@ class VBFormApp(tk.Tk):
             self._on_update_laser()
 
     def _on_init_hardware(self):
-        res = messagebox.askyesno("HR460 Initialization", "Execute hardware motor zero initialization (A command)?")
+        res = messagebox.askyesno("Spectrometer Initialization", "Execute hardware motor zero initialization?")
         if res:
             threading.Thread(target=lambda: self.mono.hard_initialize(), daemon=True).start()
 
@@ -1080,6 +1088,10 @@ class PropertiesDialog(tk.Toplevel):
             except Exception:
                 pass
             self.parent.mono = create_spectrometer(self.parent.sp_config, force_mock=self.parent.force_mock)
+            self.parent.sbr_model.config(text=f"Model: {self.parent.sp_config.instrument_model}")
+            self.parent.call_menu.entryconfig(
+                self.parent.mnu_spectrometer_model_index, label=f"Model: {self.parent.sp_config.instrument_model}"
+            )
             self.parent._connect_hardware_async()
 
         self.parent._refresh_plot()
