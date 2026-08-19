@@ -99,11 +99,23 @@ class HoribaApp(ctk.CTk):
 
     def _build_sidebar(self):
         # 1. Monochromator Control Section
-        mono_label = ctk.CTkLabel(self.sidebar, text="Monochromator (HR460)", font=ctk.CTkFont(size=16, weight="bold"))
-        mono_label.pack(anchor="w", padx=10, pady=(10, 5))
+        self.lbl_mono_section = ctk.CTkLabel(
+            self.sidebar, text=f"Monochromator ({self.config.instrument_model})", font=ctk.CTkFont(size=16, weight="bold")
+        )
+        self.lbl_mono_section.pack(anchor="w", padx=10, pady=(10, 5))
 
         mono_frame = ctk.CTkFrame(self.sidebar)
         mono_frame.pack(fill="x", padx=5, pady=5)
+
+        # Instrument Model Selector
+        model_row = ctk.CTkFrame(mono_frame, fg_color="transparent")
+        model_row.pack(fill="x", padx=5, pady=5)
+        ctk.CTkLabel(model_row, text="Model:", width=100, anchor="w").pack(side="left")
+        self.cbo_instrument_model = ctk.CTkComboBox(
+            model_row, values=["HR460", "ACTON"], width=165, command=self._on_select_instrument_model
+        )
+        self.cbo_instrument_model.set(self.config.instrument_model)
+        self.cbo_instrument_model.pack(side="left", padx=5)
 
         # Wavelength Input
         wl_row = ctk.CTkFrame(mono_frame, fg_color="transparent")
@@ -288,6 +300,22 @@ class HoribaApp(ctk.CTk):
 
         self.status_action = ctk.CTkLabel(self.statusbar, text="Ready", font=ctk.CTkFont(size=11, weight="bold"))
         self.status_action.pack(side="right", padx=15)
+
+    def _on_select_instrument_model(self, choice: str):
+        model = choice.upper()
+        if model == self.config.instrument_model.upper():
+            return
+
+        try:
+            self.mono.disconnect()
+        except Exception:
+            pass
+
+        self.config.instrument_model = model
+        self.mono = create_spectrometer(self.config, force_mock=self.force_mock)
+        self.lbl_mono_section.configure(text=f"Monochromator ({model})")
+        self.status_hw.configure(text="Monochromator: Connecting...")
+        self._connect_hardware_async()
 
     def _connect_hardware_async(self):
         def _task():

@@ -979,6 +979,14 @@ class PropertiesDialog(tk.Toplevel):
         tab_port = ttk.Frame(notebook, padding=10)
         notebook.add(tab_port, text="Port Settings")
 
+        # Instrument Model
+        r0 = ttk.Frame(tab_port)
+        r0.pack(fill="x", pady=4)
+        ttk.Label(r0, text="Model:", width=14, font=("Tahoma", 8)).pack(side="left")
+        self.cbo_model = ttk.Combobox(r0, values=["HR460", "ACTON"], state="readonly", width=16)
+        self.cbo_model.set(self.parent.sp_config.instrument_model)
+        self.cbo_model.pack(side="left")
+
         # Port
         r1 = ttk.Frame(tab_port)
         r1.pack(fill="x", pady=4)
@@ -1047,6 +1055,10 @@ class PropertiesDialog(tk.Toplevel):
         ttk.Button(btn_bar, text="Cancel", width=10, command=self.destroy).pack(side="right")
 
     def _on_save(self):
+        new_model = self.cbo_model.get()
+        model_changed = new_model.upper() != self.parent.sp_config.instrument_model.upper()
+
+        self.parent.sp_config.instrument_model = new_model
         self.parent.sp_config.com_port = self.cbo_port.get()
         self.parent.sp_config.baudrate = int(self.cbo_speed.get())
         g = self.parent.sp_config.active_grating
@@ -1061,6 +1073,15 @@ class PropertiesDialog(tk.Toplevel):
 
         self.parent.calibration = OpticalCalibration(g, self.parent.sp_config.num_pixels)
         self.parent.sbr_port.config(text=f"Port: {self.parent.sp_config.com_port} {self.parent.sp_config.baudrate},N,8,1")
+
+        if model_changed:
+            try:
+                self.parent.mono.disconnect()
+            except Exception:
+                pass
+            self.parent.mono = create_spectrometer(self.parent.sp_config, force_mock=self.parent.force_mock)
+            self.parent._connect_hardware_async()
+
         self.parent._refresh_plot()
         self.destroy()
 
