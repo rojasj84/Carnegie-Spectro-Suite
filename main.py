@@ -14,4 +14,5 @@ if __name__ == "__main__":
     # Default to GUI if no arguments are passed
     if len(sys.argv) == 1:
         sys.argv.append("gui")
+        sys.argv.append("--modern")
     main()
