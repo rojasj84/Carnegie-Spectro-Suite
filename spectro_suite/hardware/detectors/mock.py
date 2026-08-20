@@ -83,7 +83,7 @@ class MockCamera:
         shot_noise = rng.normal(0, np.sqrt(data + 1.0))
         data += shot_noise
 
-        return np.maximum(data, 0.0), 1
+        return np.round(np.maximum(data, 0.0)).astype(np.int64), 1
 
 
 # Alias for detector terminology parity

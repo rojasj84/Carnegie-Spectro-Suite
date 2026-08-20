@@ -552,7 +552,7 @@ class VBFormApp(tk.Tk):
                 self.cursor_y = self.current_spectrum[idx]
                 self.lbl_cur_pix.config(text=f"Pxl: {self.cursor_pixel}")
                 self.lbl_cur_x.config(text=f"X: {self.cursor_x:.3f}")
-                self.lbl_cur_y.config(text=f"Y: {self.cursor_y:.1f}")
+                self.lbl_cur_y.config(text=f"Y: {int(round(float(self.cursor_y)))}")
 
                 # Peak pressure calculation if near ruby R1
                 wl_nm = self.current_raw_wavelengths[idx]
@@ -865,7 +865,7 @@ class VBFormApp(tk.Tk):
             )
         else:
             header = f"Laser: {self.sp_config.active_grating.laser_wavelength:.3f} nm, Center: {self.mono.current_wavelength_nm:.3f} nm\n{self.current_unit.value}\tIntensity"
-            np.savetxt(path, np.column_stack((x, self.current_spectrum)), fmt="%.6f\t%.4f", header=header)
+            np.savetxt(path, np.column_stack((x, np.round(self.current_spectrum).astype(np.int64))), fmt=["%.6f", "%d"], header=header)
         self.sbr_status.config(text=f"Status: Saved to {os.path.basename(path)}")
 
     def _on_load_spectrum(self):
@@ -1321,7 +1321,7 @@ class GlueDialog(tk.Toplevel):
                 self.progress["value"] = idx + 1
 
             x_st, y_st = self.parent.stitcher.stitch_spectra(w_wins, i_wins)
-            np.savetxt(fname, np.column_stack((x_st, y_st)), fmt="%.6f\t%.4f", header="Wavelength_nm\tIntensity")
+            np.savetxt(fname, np.column_stack((x_st, np.round(y_st).astype(np.int64))), fmt=["%.6f", "%d"], header="Wavelength_nm\tIntensity")
 
             self.parent.current_raw_wavelengths = x_st
             self.parent.current_spectrum = y_st

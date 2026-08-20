@@ -77,7 +77,7 @@ class SpeFile:
             f.write(f"# Laser: {self.laser_wavelength:.3f} nm, Center: {self.center_wavelength:.3f} nm\n")
             f.write(f"# X_Wavelength\tY_Intensity\n")
             for xi, yi in zip(x, y):
-                f.write(f"{xi:.6f}\t{yi:.6f}\n")
+                f.write(f"{xi:.6f}\t{int(round(float(yi)))}\n")
 
 
 def read_spe(filepath: str) -> SpeFile:

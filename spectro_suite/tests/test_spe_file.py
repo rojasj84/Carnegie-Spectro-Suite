@@ -76,7 +76,7 @@ class TestSpeFile(unittest.TestCase):
                 os.remove(tmp_path)
 
     def test_ascii_export(self):
-        test_data = np.array([10.0, 20.0, 30.0], dtype=np.float32)
+        test_data = np.array([10.4, 20.6, 30.1], dtype=np.float32)
         spe = SpeFile(data=test_data, xdim=3, ydim=1, num_frames=1, exposure_time=1.0)
         
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".dat") as tmp:
@@ -84,10 +84,17 @@ class TestSpeFile(unittest.TestCase):
 
         try:
             spe.to_ascii(tmp_path, x_axis=np.array([500.0, 501.0, 502.0]))
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                lines = [l.strip() for l in f if not l.startswith("#")]
+            # Check integer values rounded: 10, 21, 30
+            self.assertEqual(lines[0].split("\t")[1], "10")
+            self.assertEqual(lines[1].split("\t")[1], "21")
+            self.assertEqual(lines[2].split("\t")[1], "30")
+
             loaded = np.loadtxt(tmp_path)
             self.assertEqual(loaded.shape, (3, 2))
             self.assertAlmostEqual(loaded[0, 0], 500.0)
-            self.assertAlmostEqual(loaded[0, 1], 10.0)
+            self.assertEqual(int(loaded[0, 1]), 10)
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)

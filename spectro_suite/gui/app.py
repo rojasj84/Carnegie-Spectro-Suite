@@ -574,7 +574,7 @@ class HoribaApp(ctk.CTk):
     def _on_plot_hover(self, event):
         if event.inaxes == self.ax and event.xdata is not None and event.ydata is not None:
             self.lbl_peak_info.configure(
-                text=f"Cursor X: {event.xdata:.3f} {self.current_unit.value} | Y: {event.ydata:.1f}"
+                text=f"Cursor X: {event.xdata:.3f} {self.current_unit.value} | Y: {int(round(float(event.ydata)))}"
             )
 
     def _on_save_spectrum(self):
@@ -597,7 +597,7 @@ class HoribaApp(ctk.CTk):
                 laser_wavelength_nm=g.laser_wavelength,
             )
         else:
-            np.savetxt(path, np.column_stack((x, self.current_spectrum)), fmt="%.6f\t%.4f", header=f"{self.current_unit.value}\tIntensity")
+            np.savetxt(path, np.column_stack((x, np.round(self.current_spectrum).astype(np.int64))), fmt=["%.6f", "%d"], header=f"{self.current_unit.value}\tIntensity")
         self.status_action.configure(text=f"Saved to {os.path.basename(path)}")
 
     def _on_load_spectrum(self):

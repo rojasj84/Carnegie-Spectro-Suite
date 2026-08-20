@@ -148,8 +148,8 @@ def main():
             data, _ = cam.acquire_frame(args.exposure, wavelengths_nm=wls)
             accum_data.append(data)
         
-        final_y = np.mean(accum_data, axis=0)
-        np.savetxt(args.output, np.column_stack((wls, final_y)), fmt="%.6f\t%.4f", header="Wavelength_nm\tIntensity")
+        final_y = np.round(np.mean(accum_data, axis=0)).astype(np.int64)
+        np.savetxt(args.output, np.column_stack((wls, final_y)), fmt=["%.6f", "%d"], header="Wavelength_nm\tIntensity")
         print(f"Spectrum saved to {args.output}")
 
     elif args.command == "move":

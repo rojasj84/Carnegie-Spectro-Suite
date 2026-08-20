@@ -88,7 +88,7 @@ class WinSpecController:
         frame_data = self.doc_file.GetFrame(1)
         max_pix_x = int(self.doc_file.GetParam(DM_ROI_ENDX))
 
-        data_array = np.array(frame_data, dtype=np.float32)
+        data_array = np.round(np.array(frame_data, dtype=np.float64)).astype(np.int64)
         if data_array.ndim > 1 and data_array.shape[1] == 1:
             data_array = data_array.flatten()
         elif data_array.ndim > 1 and data_array.shape[0] == 1:
@@ -157,4 +157,4 @@ class MockWinSpecCamera:
         ruby_r2 = 2000.0 * exposure_time_sec * np.exp(-((x_wl - 692.95) / 0.15) ** 2)
         spectrum += ruby_r1 + ruby_r2
 
-        return np.maximum(0.0, spectrum), n_pix
+        return np.round(np.maximum(0.0, spectrum)).astype(np.int64), n_pix
