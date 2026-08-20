@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spectro-suite"
+version = "2.0.0"
+description = "Universal Hardware-Agnostic Spectrometry Suite for Multi-Vendor Spectrometers & Detectors (Acton SpectraPro, Horiba HR460, PI-MTE, WinSpec)"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+    "matplotlib>=3.5.0",
+    "pyserial>=3.5",
+    "customtkinter>=6.0.0",
+]
+
+[project.optional-dependencies]
+windows = [
+    "pywin32>=306",
+]
+
+[project.scripts]
+spectro-suite = "spectro_suite.cli:main"
+spectro = "spectro_suite.cli:main"
+horiba-hr460 = "spectro_suite.cli:main"

@@ -16,8 +16,15 @@ import logging
 from typing import Optional, Callable
 import serial
 
-from ..config import SpectrometerConfig, GratingConfig
-from .base import MonochromatorStatus
+try:
+    from ..config import SpectrometerConfig, GratingConfig
+    from .base import MonochromatorStatus
+except (ImportError, ValueError):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from horiba_hr460.config import SpectrometerConfig, GratingConfig
+    from horiba_hr460.hardware.base import MonochromatorStatus
 
 logger = logging.getLogger("horiba_hr460")
 
@@ -29,6 +36,8 @@ class ActonSpectrometer:
     Serial controller for Acton Research Corporation / Princeton Instruments
     SpectraPro-series monochromators over RS-232.
     """
+
+    is_mock = False
 
     def __init__(
         self,
@@ -226,6 +235,8 @@ class MockActonSpectrometer(ActonSpectrometer):
     Simulated Acton SpectraPro monochromator for development and demonstration.
     """
 
+    is_mock = True
+
     def __init__(self, config: Optional[SpectrometerConfig] = None):
         super().__init__(port="MOCK_COM", baudrate=9600, config=config)
         self.status = MonochromatorStatus.DEMO_MODE
@@ -275,3 +286,15 @@ class MockActonSpectrometer(ActonSpectrometer):
         self._active_grating_idx = grating_index
         self.status = MonochromatorStatus.DEMO_MODE
         return True
+
+
+if __name__ == "__main__":
+    print("Testing MockActonSpectrometer driver...")
+    driver = MockActonSpectrometer()
+    driver.connect()
+    print(f"Status: {driver.status.name}")
+    print("Moving to 500.0 nm...")
+    driver.move_to_wavelength(500.0, progress_callback=lambda wl: print(f"  -> {wl:.2f} nm"))
+    print(f"Current wavelength: {driver.current_wavelength_nm} nm")
+    print("Acton driver loaded and tested successfully!")
+

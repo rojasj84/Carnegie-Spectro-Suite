@@ -1,30 +1,58 @@
 """
-Universal Spectrometer & Detector Control Suite
-================================================
-A modern Python interface for controlling multi-vendor spectrometers
-(Horiba, Acton SpectraPro, etc.) and optical detectors/cameras.
+Backward compatibility layer for legacy imports.
+All active functionality has migrated to `spectro_suite`.
 """
 
-from .config import SpectrometerConfig, GratingConfig
-from .core.calibration import OpticalCalibration, Units
-from .core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
-from .core.stitcher import SpectrumStitcher, StitchInterval
-from .core.spe_file import read_spe, write_spe, SpeFile
-from .hardware.base import MonochromatorStatus, Spectrometer, Camera
-from .hardware.hr460 import HoribaHR460, MockHoribaHR460
-from .hardware.acton import ActonSpectrometer, MockActonSpectrometer
-from .hardware.camera import MockCamera
-from .hardware.winspec import WinSpecController, MockWinSpecCamera
-from .hardware.factory import create_spectrometer, create_camera
+import warnings
+from spectro_suite import (
+    SpectrometerConfig,
+    GratingConfig,
+    OpticalCalibration,
+    Units,
+    ruby_pressure,
+    remove_cosmic_rays_threshold,
+    remove_cosmic_rays_median,
+    remove_single_frame_spikes,
+    SpectrumStitcher,
+    StitchInterval,
+    read_spe,
+    write_spe,
+    SpeFile,
+    MonochromatorStatus,
+    Spectrometer,
+    Camera,
+    Detector,
+    ActonSpectrometer,
+    MockActonSpectrometer,
+    HoribaHR460,
+    MockHoribaHR460,
+    MockCamera,
+    MockDetector,
+    PIMTECamera,
+    WinSpecController,
+    MockWinSpecCamera,
+    create_spectrometer,
+    create_camera,
+    create_detector,
+)
 
-__version__ = "1.1.0"
+warnings.warn(
+    "Importing from 'horiba_hr460' is deprecated and will be removed in future versions. "
+    "Please import from 'spectro_suite' instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+__version__ = "2.0.0"
 __all__ = [
     "SpectrometerConfig",
     "GratingConfig",
     "OpticalCalibration",
     "Units",
+    "ruby_pressure",
     "remove_cosmic_rays_threshold",
     "remove_cosmic_rays_median",
+    "remove_single_frame_spikes",
     "SpectrumStitcher",
     "StitchInterval",
     "read_spe",
@@ -33,14 +61,17 @@ __all__ = [
     "MonochromatorStatus",
     "Spectrometer",
     "Camera",
-    "HoribaHR460",
-    "MockHoribaHR460",
+    "Detector",
     "ActonSpectrometer",
     "MockActonSpectrometer",
+    "HoribaHR460",
+    "MockHoribaHR460",
     "MockCamera",
+    "MockDetector",
+    "PIMTECamera",
     "WinSpecController",
     "MockWinSpecCamera",
     "create_spectrometer",
     "create_camera",
+    "create_detector",
 ]
-

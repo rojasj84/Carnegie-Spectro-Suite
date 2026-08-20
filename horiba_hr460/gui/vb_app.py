@@ -20,15 +20,29 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
-from ..config import SpectrometerConfig, GratingConfig
-from ..core.calibration import OpticalCalibration, Units, ruby_pressure
-from ..core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
-from ..core.stitcher import SpectrumStitcher, StitchInterval
-from ..core.spe_file import read_spe, write_spe, SpeFile
-from ..hardware.base import MonochromatorStatus
-from ..hardware.factory import create_spectrometer, create_camera
-from ..core.profiles import load_app_settings, clear_default_settings
-from .device_selector import DeviceSelectorDialog
+try:
+    from ..config import SpectrometerConfig, GratingConfig
+    from ..core.calibration import OpticalCalibration, Units, ruby_pressure
+    from ..core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
+    from ..core.stitcher import SpectrumStitcher, StitchInterval
+    from ..core.spe_file import read_spe, write_spe, SpeFile
+    from ..hardware.base import MonochromatorStatus
+    from ..hardware.factory import create_spectrometer, create_camera
+    from ..core.profiles import load_app_settings, clear_default_settings
+    from .device_selector import DeviceSelectorDialog
+except (ImportError, ValueError):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from horiba_hr460.config import SpectrometerConfig, GratingConfig
+    from horiba_hr460.core.calibration import OpticalCalibration, Units, ruby_pressure
+    from horiba_hr460.core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
+    from horiba_hr460.core.stitcher import SpectrumStitcher, StitchInterval
+    from horiba_hr460.core.spe_file import read_spe, write_spe, SpeFile
+    from horiba_hr460.hardware.base import MonochromatorStatus
+    from horiba_hr460.hardware.factory import create_spectrometer, create_camera
+    from horiba_hr460.core.profiles import load_app_settings, clear_default_settings
+    from horiba_hr460.gui.device_selector import DeviceSelectorDialog
 
 
 class VBFormApp(tk.Tk):
@@ -282,8 +296,8 @@ class VBFormApp(tk.Tk):
         self.btn_stop_main.pack(side="left", padx=3)
 
         # Hardware connection icon / status badge
-        self.lbl_conn_indicator = tk.Label(self.action_frame, text="● HR460", font=("Tahoma", 9, "bold"),
-                                           fg="#CC8800", relief="groove", padx=6, pady=2)
+        self.lbl_conn_indicator = tk.Label(self.action_frame, text="● CONNECTING...", font=("Tahoma", 9, "bold"),
+                                           fg="#0284C7", relief="groove", padx=6, pady=2)
         self.lbl_conn_indicator.pack(side="right", padx=5)
 
     # =========================================================================
@@ -457,22 +471,42 @@ class VBFormApp(tk.Tk):
             mono_ok = self.mono.connect()
             cam_ok = self.camera.connect()
             if not cam_ok and not self.force_mock:
+                # Fallback to simulated camera for offline/remote operation
                 self.camera = create_camera(self.sp_config, force_mock=True)
                 self.camera.connect()
+            if not mono_ok and not self.force_mock:
+                # Fallback to simulated monochromator driver for offline/remote operation
+                self.mono = create_spectrometer(self.sp_config, force_mock=True)
+                self.mono.connect()
 
             self.after(0, self._on_connect_done)
 
         threading.Thread(target=_task, daemon=True).start()
 
     def _on_connect_done(self):
-        if self.mono.status == MonochromatorStatus.DEMO_MODE or self.camera.is_mock:
+        is_demo = (
+            self.force_mock
+            or getattr(self.mono, "is_mock", False)
+            or self.mono.status == MonochromatorStatus.DEMO_MODE
+            or getattr(self.camera, "is_mock", False)
+        )
+
+        if is_demo:
             self.lbl_conn_indicator.config(text="● DEMO MODE", fg="#CC8800")
             if "DEMO MODE" not in self.title():
                 self.title(self.title() + "      DEMO MODE")
+            self.sbr_status.config(text="Status: Simulation / Demo Mode")
+        elif self.mono.status == MonochromatorStatus.ERROR:
+            self.lbl_conn_indicator.config(text="● NOT CONNECTED", fg="#CC0000")
+            self.sbr_status.config(text=f"Status: Could not connect to {self.sp_config.com_port}")
+        elif self.mono.status == MonochromatorStatus.DISCONNECTED:
+            self.lbl_conn_indicator.config(text="● DISCONNECTED", fg="#888888")
+            self.sbr_status.config(text="Status: Disconnected")
         else:
-            self.lbl_conn_indicator.config(text="● CONNECTED", fg="#008800")
+            port_name = getattr(self.mono, "port", self.sp_config.com_port)
+            self.lbl_conn_indicator.config(text=f"● CONNECTED ({port_name})", fg="#008800")
+            self.sbr_status.config(text="Status: Ready")
 
-        self.sbr_status.config(text=f"Status: {self.mono.status.value}")
         self.sbr_pos.config(text=f"Position: {self.mono.current_wavelength_nm:.2f} nm")
         self.pos_hr460.delete(0, "end")
         self.pos_hr460.insert(0, f"{self.mono.current_wavelength_nm:.2f}")
@@ -506,8 +540,8 @@ class VBFormApp(tk.Tk):
 
         self.ax.relim()
         self.ax.autoscale_view()
-        self.ax.set_xlabel(f"Scale: {self.current_unit.value}", fontname="Tahoma", fontsize=9)
-        self.ax.set_ylabel("Intensity (Counts)", fontname="Tahoma", fontsize=9)
+        self.ax.set_xlabel(f"Scale: {self.current_unit.value}", fontsize=9)
+        self.ax.set_ylabel("Intensity (Counts)", fontsize=9)
         self.canvas.draw_idle()
 
         # Update cursor readouts
@@ -917,6 +951,13 @@ class VBFormApp(tk.Tk):
             "The hardware setup window will appear the next time you open the application."
         )
 
+    def _populate_grating_combobox(self):
+        if hasattr(self, "cmb_grating"):
+            grating_vals = [f"{g.grating_grooves_per_mm:.0f}" for g in self.sp_config.gratings]
+            self.cmb_grating.config(values=grating_vals)
+            if self.sp_config.gratings:
+                self.cmb_grating.set(f"{self.sp_config.active_grating.grating_grooves_per_mm:.0f}")
+
     def _switch_hardware(self, new_config: SpectrometerConfig, force_mock: bool = False):
         if self.mono:
             try:
@@ -939,6 +980,24 @@ class VBFormApp(tk.Tk):
             self.call_menu.entryconfigure(0, label=f"Model: {self.sp_config.instrument_model}")
 
         self._populate_grating_combobox()
+
+        if hasattr(self, "txt_time"):
+            self.txt_time.delete(0, "end")
+            self.txt_time.insert(0, f"{self.sp_config.active_grating.exposure_time_sec:.2f}")
+        if hasattr(self, "pos_hr460"):
+            self.pos_hr460.delete(0, "end")
+            self.pos_hr460.insert(0, f"{self.sp_config.active_grating.spectrometer_pos_nm:.2f}")
+        if hasattr(self, "txt_slit"):
+            self.txt_slit.delete(0, "end")
+            self.txt_slit.insert(0, f"{self.sp_config.active_grating.slit_size:.0f}")
+        if hasattr(self, "cmb_laser"):
+            self.cmb_laser.delete(0, "end")
+            self.cmb_laser.insert(0, f"{self.sp_config.active_grating.laser_wavelength:.3f}")
+        if hasattr(self, "sbr_grating"):
+            self.sbr_grating.config(text=f"Grating: {self.sp_config.active_grating.grating_grooves_per_mm:.0f} g/mm")
+        if hasattr(self, "sbr_pos"):
+            self.sbr_pos.config(text=f"Position: {self.sp_config.active_grating.spectrometer_pos_nm:.2f} nm")
+
         self.mono = create_spectrometer(self.sp_config, force_mock=self.force_mock)
         self.camera = create_camera(self.sp_config, force_mock=self.force_mock)
         self._connect_hardware_async()
@@ -1325,3 +1384,8 @@ def launch_vb_gui(
     """Launch the authentic VB-styled application."""
     app = VBFormApp(config_path=config_path, force_mock=force_mock, config=config)
     app.mainloop()
+
+
+if __name__ == "__main__":
+    launch_vb_gui()
+

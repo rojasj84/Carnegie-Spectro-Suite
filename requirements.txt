@@ -1,0 +1,8 @@
+# Core dependencies for Universal Spectrometer & Detector Control Suite
+numpy>=1.20.0
+matplotlib>=3.5.0
+pyserial>=3.5
+customtkinter>=6.0.0
+
+# Optional Windows COM automation (uncomment on Windows if using WinSpec32)
+# pywin32>=306; sys_platform == 'win32'

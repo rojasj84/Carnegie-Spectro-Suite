@@ -18,13 +18,25 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import matplotlib.pyplot as plt
 
-from ..config import SpectrometerConfig, GratingConfig
-from ..core.calibration import OpticalCalibration, Units, ruby_pressure
-from ..core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
-from ..core.stitcher import SpectrumStitcher
-from ..core.spe_file import read_spe, write_spe
-from ..hardware.base import MonochromatorStatus
-from ..hardware.factory import create_spectrometer, create_camera
+try:
+    from ..config import SpectrometerConfig, GratingConfig
+    from ..core.calibration import OpticalCalibration, Units, ruby_pressure
+    from ..core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
+    from ..core.stitcher import SpectrumStitcher
+    from ..core.spe_file import read_spe, write_spe
+    from ..hardware.base import MonochromatorStatus
+    from ..hardware.factory import create_spectrometer, create_camera
+except (ImportError, ValueError):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from horiba_hr460.config import SpectrometerConfig, GratingConfig
+    from horiba_hr460.core.calibration import OpticalCalibration, Units, ruby_pressure
+    from horiba_hr460.core.filters import remove_cosmic_rays_threshold, remove_cosmic_rays_median
+    from horiba_hr460.core.stitcher import SpectrumStitcher
+    from horiba_hr460.core.spe_file import read_spe, write_spe
+    from horiba_hr460.hardware.base import MonochromatorStatus
+    from horiba_hr460.hardware.factory import create_spectrometer, create_camera
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -331,16 +343,30 @@ class HoribaApp(ctk.CTk):
             mono_ok = self.mono.connect()
             cam_ok = self.camera.connect()
             if not cam_ok and not self.force_mock:
-                # Fallback to simulated camera
+                # Fallback to simulated camera for offline/remote operation
                 self.camera = create_camera(self.config, force_mock=True)
                 self.camera.connect()
+            if not mono_ok and not self.force_mock:
+                # Fallback to simulated monochromator driver for offline/remote operation
+                self.mono = create_spectrometer(self.config, force_mock=True)
+                self.mono.connect()
 
             self.after(0, self._update_connection_status)
 
         threading.Thread(target=_task, daemon=True).start()
 
     def _update_connection_status(self):
-        self.status_hw.configure(text=f"Monochromator: {self.mono.status.value}")
+        is_demo = (
+            self.force_mock
+            or getattr(self.mono, "is_mock", False)
+            or self.mono.status == MonochromatorStatus.DEMO_MODE
+            or getattr(self.camera, "is_mock", False)
+        )
+        if is_demo:
+            self.status_hw.configure(text="Monochromator: Simulation Mode (Offline)")
+        else:
+            self.status_hw.configure(text=f"Monochromator: {self.mono.status.value}")
+
         cam_type = "Simulated (Mock)" if self.camera.is_mock else getattr(self.config, "camera_model", "Connected")
         self.status_cam.configure(text=f"Detector: {cam_type}")
         self._refresh_plot()
@@ -665,3 +691,8 @@ def launch_gui(
     """Entry point to launch the graphical user interface."""
     app = HoribaApp(config_path=config_path, force_mock=force_mock, config=config)
     app.mainloop()
+
+
+if __name__ == "__main__":
+    launch_gui()
+

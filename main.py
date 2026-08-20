@@ -7,7 +7,7 @@ Graphical User Interface (GUI) immediately.
 
 from __future__ import annotations
 import sys
-from horiba_hr460.cli import main
+from spectro_suite.cli import main
 
 
 if __name__ == "__main__":

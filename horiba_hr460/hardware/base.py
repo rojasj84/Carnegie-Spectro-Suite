@@ -24,6 +24,7 @@ class Spectrometer(Protocol):
     """Interface satisfied by any monochromator/spectrograph driver (e.g. HoribaHR460, ActonSpectrometer)."""
 
     status: MonochromatorStatus
+    is_mock: bool
 
     @property
     def current_wavelength_nm(self) -> float: ...

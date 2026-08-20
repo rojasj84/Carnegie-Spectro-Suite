@@ -15,23 +15,33 @@ class TestSpectrometerFactory(unittest.TestCase):
 
     def test_hr460_real(self):
         cfg = SpectrometerConfig(instrument_model="HR460")
-        self.assertIsInstance(create_spectrometer(cfg, force_mock=False), HoribaHR460)
+        inst = create_spectrometer(cfg, force_mock=False)
+        self.assertIsInstance(inst, HoribaHR460)
+        self.assertFalse(inst.is_mock)
 
     def test_hr460_mock(self):
         cfg = SpectrometerConfig(instrument_model="HR460")
-        self.assertIsInstance(create_spectrometer(cfg, force_mock=True), MockHoribaHR460)
+        inst = create_spectrometer(cfg, force_mock=True)
+        self.assertIsInstance(inst, MockHoribaHR460)
+        self.assertTrue(inst.is_mock)
 
     def test_acton_real(self):
         cfg = SpectrometerConfig(instrument_model="ACTON")
-        self.assertIsInstance(create_spectrometer(cfg, force_mock=False), ActonSpectrometer)
+        inst = create_spectrometer(cfg, force_mock=False)
+        self.assertIsInstance(inst, ActonSpectrometer)
+        self.assertFalse(inst.is_mock)
 
     def test_acton_mock(self):
         cfg = SpectrometerConfig(instrument_model="ACTON")
-        self.assertIsInstance(create_spectrometer(cfg, force_mock=True), MockActonSpectrometer)
+        inst = create_spectrometer(cfg, force_mock=True)
+        self.assertIsInstance(inst, MockActonSpectrometer)
+        self.assertTrue(inst.is_mock)
 
     def test_instrument_model_case_insensitive(self):
         cfg = SpectrometerConfig(instrument_model="acton")
-        self.assertIsInstance(create_spectrometer(cfg, force_mock=True), MockActonSpectrometer)
+        inst = create_spectrometer(cfg, force_mock=True)
+        self.assertIsInstance(inst, MockActonSpectrometer)
+        self.assertTrue(inst.is_mock)
 
 
 class TestCameraFactory(unittest.TestCase):

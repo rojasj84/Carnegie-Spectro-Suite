@@ -8,8 +8,15 @@ import logging
 from typing import Optional, Callable, Tuple
 import serial
 
-from ..config import SpectrometerConfig, GratingConfig
-from .base import MonochromatorStatus
+try:
+    from ..config import SpectrometerConfig, GratingConfig
+    from .base import MonochromatorStatus
+except (ImportError, ValueError):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from horiba_hr460.config import SpectrometerConfig, GratingConfig
+    from horiba_hr460.hardware.base import MonochromatorStatus
 
 logger = logging.getLogger("horiba_hr460")
 
@@ -18,6 +25,8 @@ class HoribaHR460:
     """
     Serial controller for Horiba Jobin Yvon HR460 Monochromator over RS-232.
     """
+
+    is_mock = False
 
     def __init__(
         self,
@@ -307,6 +316,8 @@ class MockHoribaHR460(HoribaHR460):
     Simulated Horiba HR460 monochromator for development and demonstration.
     """
 
+    is_mock = True
+
     def __init__(self, config: Optional[SpectrometerConfig] = None):
         super().__init__(port="MOCK_COM", baudrate=9600, config=config)
         self.status = MonochromatorStatus.DEMO_MODE
@@ -352,3 +363,15 @@ class MockHoribaHR460(HoribaHR460):
         self._active_grating_idx = grating_index
         self.status = MonochromatorStatus.DEMO_MODE
         return True
+
+
+if __name__ == "__main__":
+    print("Testing MockHoribaHR460 driver...")
+    driver = MockHoribaHR460()
+    driver.connect()
+    print(f"Status: {driver.status.name}")
+    print("Moving to 650.0 nm...")
+    driver.move_to_wavelength(650.0, progress_callback=lambda wl: print(f"  -> {wl:.2f} nm"))
+    print(f"Current wavelength: {driver.current_wavelength_nm} nm")
+    print("HR460 driver loaded and tested successfully!")
+
