@@ -474,6 +474,13 @@ class VBFormApp(tk.Tk):
         self.sbr_pos = ttk.Label(self.statusbar, text=f"Position: {self.sp_config.active_grating.spectrometer_pos_nm:.2f} nm", relief="groove", padding=(4, 2), font=("Tahoma", 8))
         self.sbr_pos.pack(side="left", padx=1)
 
+    def _safe_ui(self, fn: Callable[[], Any]) -> None:
+        """Safely execute a UI operation on the main Tkinter thread."""
+        try:
+            self.after(0, fn)
+        except Exception:
+            pass
+
     # =========================================================================
     # 5. HARDWARE CONNECTION & BACKGROUND TASKS
     # =========================================================================
@@ -490,10 +497,7 @@ class VBFormApp(tk.Tk):
                 self.mono = create_spectrometer(self.sp_config, force_mock=True)
                 self.mono.connect()
 
-            try:
-                self.after(0, self._on_connect_done)
-            except Exception:
-                pass
+            self._safe_ui(self._on_connect_done)
 
         threading.Thread(target=_task, daemon=True).start()
 
@@ -693,22 +697,22 @@ class VBFormApp(tk.Tk):
 
         def _task():
             try:
-                self.sbr_status.config(text="Status: Acquiring 1 Spectrum...")
+                self._safe_ui(lambda: self.sbr_status.config(text="Status: Acquiring 1 Spectrum..."))
                 wls = self.calibration.get_pixel_wavelengths(self.mono.current_wavelength_nm, self.sp_config.num_pixels)
                 
                 def _prog(tl):
-                    self.after(0, lambda: self.sbr_time.config(text=f"Time Left: {tl:.1f}s"))
+                    self._safe_ui(lambda: self.sbr_time.config(text=f"Time Left: {tl:.1f}s"))
 
                 data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
 
                 self.current_spectrum = data
-                self.after(0, self._refresh_plot)
+                self._safe_ui(self._refresh_plot)
             except Exception as ex:
-                self.after(0, lambda: self.sbr_status.config(text=f"Acquisition Error: {ex}"))
+                self._safe_ui(lambda: self.sbr_status.config(text=f"Acquisition Error: {ex}"))
             finally:
                 self.is_acquiring = False
-                self.after(0, lambda: self.sbr_status.config(text="Status: Ready"))
-                self.after(0, lambda: self.sbr_time.config(text="Time Left: 0.0s"))
+                self._safe_ui(lambda: self.sbr_status.config(text="Status: Ready"))
+                self._safe_ui(lambda: self.sbr_time.config(text="Time Left: 0.0s"))
 
         threading.Thread(target=_task, daemon=True).start()
 
@@ -731,10 +735,10 @@ class VBFormApp(tk.Tk):
                 for a in range(1, n_acc + 1):
                     if self.stop_requested:
                         break
-                    self.sbr_status.config(text=f"Status: Accumulation {a} of {n_acc}...")
+                    self._safe_ui(lambda: self.sbr_status.config(text=f"Status: Accumulation {a} of {n_acc}..."))
                     
                     def _prog(tl):
-                        self.after(0, lambda: self.sbr_time.config(text=f"Time Left: {tl:.1f}s ({a}/{n_acc})"))
+                        self._safe_ui(lambda: self.sbr_time.config(text=f"Time Left: {tl:.1f}s ({a}/{n_acc})"))
 
                     data, _ = self.camera.acquire_frame(exp_time, wavelengths_nm=wls, progress_callback=_prog, stop_requested=lambda: self.stop_requested)
 
@@ -752,13 +756,13 @@ class VBFormApp(tk.Tk):
                     else:
                         self.current_spectrum = np.mean(frames, axis=0)
 
-                    self.after(0, self._refresh_plot)
+                    self._safe_ui(self._refresh_plot)
             except Exception as ex:
-                self.after(0, lambda: self.sbr_status.config(text=f"Multi-Acq Error: {ex}"))
+                self._safe_ui(lambda: self.sbr_status.config(text=f"Multi-Acq Error: {ex}"))
             finally:
                 self.is_acquiring = False
-                self.after(0, lambda: self.sbr_status.config(text="Status: Ready"))
-                self.after(0, lambda: self.sbr_time.config(text="Time Left: 0.0s"))
+                self._safe_ui(lambda: self.sbr_status.config(text="Status: Ready"))
+                self._safe_ui(lambda: self.sbr_time.config(text="Time Left: 0.0s"))
 
         threading.Thread(target=_task, daemon=True).start()
 

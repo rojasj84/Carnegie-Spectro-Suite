@@ -68,6 +68,15 @@ class ActonSpectrometer:
     def active_grating(self) -> GratingConfig:
         return self.config.active_grating
 
+    @property
+    def is_connected(self) -> bool:
+        return self.status in (
+            MonochromatorStatus.READY,
+            MonochromatorStatus.MOVING,
+            MonochromatorStatus.CHANGING_GRATING,
+            MonochromatorStatus.DEMO_MODE,
+        )
+
     def connect(self) -> bool:
         """Open the serial port and designate the entrance slit for width commands."""
         try:

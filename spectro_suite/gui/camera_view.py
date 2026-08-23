@@ -64,11 +64,16 @@ class CameraDisplayWindow(tk.Toplevel):
             super().__init__(self.root_app)
             self.parent = self.root_app
 
-        # Use passed camera or fallback to single BlackflySCamera instance
-        if camera is not None:
+        # Use passed camera if it is Blackfly S; otherwise instantiate physical/mock Blackfly S camera
+        if camera is not None and isinstance(camera, (BlackflySCamera, MockBlackflySCamera)):
             self.camera = camera
+            self._owns_camera = False
         else:
             self.camera = BlackflySCamera()
+            if not self.camera.connect():
+                self.camera = MockBlackflySCamera()
+                self.camera.connect()
+            self._owns_camera = True
 
         self.on_close_callback = on_close_callback
 
@@ -652,6 +657,11 @@ class CameraDisplayWindow(tk.Toplevel):
         """Handle window close event."""
         self.is_running = False
         time.sleep(0.05)
+        if getattr(self, "_owns_camera", False) and self.camera:
+            try:
+                self.camera.disconnect()
+            except Exception:
+                pass
         if self.on_close_callback:
             self.on_close_callback()
         try:

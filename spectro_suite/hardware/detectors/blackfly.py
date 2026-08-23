@@ -64,7 +64,7 @@ class BlackflySCamera:
         self._is_acquiring = False
         self._exposure_time_us: float = 20000.0
         self._gain_db: float = 0.0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         if self._dll_path and os.path.exists(self._dll_path):
             try:
@@ -347,7 +347,7 @@ class BlackflySCamera:
             spectrum_1d = np.interp(x_target, x_orig, spectrum_1d).astype(np.float32)
 
         max_val = int(np.max(spectrum_1d)) if len(spectrum_1d) > 0 else 0
-        return spectrum_1d, max_val
+        return np.round(np.maximum(spectrum_1d, 0.0)).astype(np.int64), max_val
 
     def set_exposure_time(self, exposure_time_sec: float) -> bool:
         """Set sensor exposure time in seconds."""

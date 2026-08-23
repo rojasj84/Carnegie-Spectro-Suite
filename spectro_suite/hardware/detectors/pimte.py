@@ -34,9 +34,16 @@ class PicamCameraID(ctypes.Structure):
     ]
 
 
+class PicamAvailableData(ctypes.Structure):
+    _fields_ = [
+        ("initial_readout", ctypes.c_void_p),
+        ("readout_count", ctypes.c_int64),
+    ]
+
+
 class PIMTECamera:
     """
-    Direct hardware controller for Princeton Instruments PI MTE USB Camera.
+    Direct hardware controller for Princeton Instruments PI MTE / PIXIS / PyLoN USB Camera.
     """
 
     is_mock = False
@@ -47,12 +54,12 @@ class PIMTECamera:
         self.is_connected = False
         self._picam_dll: Optional[ctypes.CDLL] = None
         self._cam_handle: Optional[ctypes.c_void_p] = None
-        self._camera_name = "PI MTE USB Camera"
+        self._camera_name = "PI MTE / PyLoN USB Camera"
         self._mock_fallback: Optional[MockCamera] = None
 
     def connect(self) -> bool:
         """
-        Initialize PICam SDK and open the PI MTE USB Camera.
+        Initialize PICam SDK and open the Princeton Instruments USB Camera.
         """
         logger.info(f"Connecting to {self._camera_name}...")
 
@@ -97,12 +104,12 @@ class PIMTECamera:
             if open_err == 0 and handle.value:
                 self._cam_handle = handle
                 self.is_connected = True
+                self._mock_fallback = None
                 logger.info(f"Successfully opened physical {self._camera_name} (Handle: {handle.value}).")
                 return True
             else:
                 logger.info(
-                    f"{self._camera_name} PICam SDK active (driver ready). "
-                    f"Camera status: Ready for acquisition."
+                    f"{self._camera_name} PICam SDK active. Initializing detector fallback."
                 )
                 self.is_connected = True
                 self._mock_fallback = MockCamera(num_pixels=self.num_pixels)
@@ -151,27 +158,48 @@ class PIMTECamera:
         if not self.is_connected:
             self.connect()
 
-        # If running via fallback or simulator
-        if self._mock_fallback is not None:
-            return self._mock_fallback.acquire_frame(
-                exposure_time_sec=exposure_time_sec,
-                wavelengths_nm=wavelengths_nm,
-                progress_callback=progress_callback,
-                stop_requested=stop_requested
-            )
+        # If physical PICam hardware handle is active
+        if self._picam_dll and self._cam_handle:
+            try:
+                timeout_ms = int(max(3000, exposure_time_sec * 1000 + 2000))
+                avail = PicamAvailableData()
+                err_mask = ctypes.c_int(0)
 
-        # Physical PICam readout
-        steps = max(1, int(exposure_time_sec / 0.05))
-        for step in range(steps):
-            if stop_requested and stop_requested():
-                raise InterruptedError("Acquisition cancelled.")
-            if progress_callback:
-                progress_callback((step + 1) / steps)
-            time.sleep(min(0.05, exposure_time_sec / steps))
+                self._picam_dll.Picam_Acquire.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_int64,
+                    ctypes.c_int,
+                    ctypes.POINTER(PicamAvailableData),
+                    ctypes.POINTER(ctypes.c_int)
+                ]
+                self._picam_dll.Picam_Acquire.restype = ctypes.c_int
 
-        # Return baseline array with calibrated shape
-        data = np.zeros(self.num_pixels, dtype=np.float32)
-        return data, self.num_pixels
+                err = self._picam_dll.Picam_Acquire(
+                    self._cam_handle,
+                    1,
+                    timeout_ms,
+                    ctypes.byref(avail),
+                    ctypes.byref(err_mask)
+                )
+
+                if err == 0 and avail.initial_readout and avail.readout_count > 0:
+                    raw_p = (ctypes.c_uint16 * self.num_pixels).from_address(avail.initial_readout)
+                    data = np.frombuffer(raw_p, dtype=np.uint16).astype(np.int64)
+                    return data, 1
+            except Exception as ex:
+                logger.warning(f"PICam physical acquisition failed: {ex}")
+
+        # Fallback to simulated / mock detector
+        if self._mock_fallback is None:
+            self._mock_fallback = MockCamera(num_pixels=self.num_pixels)
+            self._mock_fallback.connect()
+
+        return self._mock_fallback.acquire_frame(
+            exposure_time_sec=exposure_time_sec,
+            wavelengths_nm=wavelengths_nm,
+            progress_callback=progress_callback,
+            stop_requested=stop_requested
+        )
 
     def grab_2d_frame(self, color_mode: str = "RGB", timeout_ms: int = 2000) -> Optional[np.ndarray]:
         """Grab a 2D frame from the detector."""
