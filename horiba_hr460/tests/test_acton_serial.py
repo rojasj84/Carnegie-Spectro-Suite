@@ -70,6 +70,39 @@ class TestActonDrivers(unittest.TestCase):
         wl = mono._query_float("?NM")
         self.assertAlmostEqual(wl, 300.00)
 
+    def test_read_gratings_queries(self):
+        mono = ActonSpectrometer(port="COM_TEST", config=self.config)
+
+        class _FakeSerial:
+            def __init__(self, payload: bytes):
+                self._payload = payload
+                self.in_waiting = len(payload)
+
+            def reset_input_buffer(self):
+                pass
+
+            def write(self, data):
+                pass
+
+            def read(self, n):
+                chunk, self._payload = self._payload[:n], self._payload[n:]
+                self.in_waiting = len(self._payload)
+                return chunk
+
+        # Test ?GRATING
+        mono.ser = _FakeSerial(b"?GRATING 2 ok\r\n")
+        idx = mono.read_active_grating()
+        self.assertEqual(idx, 1) # 2 -> 0-based index 1
+        self.assertEqual(mono.config.active_grating_index, 1)
+
+        # Test ?GRATINGS
+        gratings_payload = b"?GRATINGS \r\n 1 300 g/mm BLZ= 750NM \r\n 2 600 g/mm BLZ= 1.0UM \r\n 3 Not Installed \r\n ok\r\n"
+        mono.ser = _FakeSerial(gratings_payload)
+        gratings = mono.read_installed_gratings()
+        self.assertEqual(len(gratings), 2)
+        self.assertAlmostEqual(gratings[0].grating_grooves_per_mm, 300.0)
+        self.assertAlmostEqual(gratings[1].grating_grooves_per_mm, 600.0)
+
 
 if __name__ == "__main__":
     unittest.main()

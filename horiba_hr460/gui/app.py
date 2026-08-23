@@ -213,6 +213,15 @@ class HoribaApp(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_bar.pack(fill="x", padx=10, pady=8)
 
+        # 2D Live Camera Viewer Button
+        ctk.CTkButton(
+            cam_frame,
+            text="📷 Live 2D Camera View...",
+            fg_color="#2563EB",
+            hover_color="#1D4ED8",
+            command=self._open_camera_view
+        ).pack(fill="x", padx=10, pady=(2, 8))
+
         # 3. Optical Parameters & Tools
         tools_label = ctk.CTkLabel(self.sidebar, text="Optical Tools & Scale", font=ctk.CTkFont(size=16, weight="bold"))
         tools_label.pack(anchor="w", padx=10, pady=(15, 5))
@@ -655,6 +664,15 @@ class HoribaApp(ctk.CTk):
             threading.Thread(target=_stitch_task, daemon=True).start()
 
         ctk.CTkButton(dialog, text="Start Stitched Scan", command=_do_stitch).pack(pady=15)
+
+    def _open_camera_view(self):
+        """Open the dedicated live 2D camera view window."""
+        from .camera_view import CameraDisplayWindow
+        if hasattr(self, "_cam_win") and self._cam_win and self._cam_win.winfo_exists():
+            self._cam_win.lift()
+            self._cam_win.focus_force()
+            return
+        self._cam_win = CameraDisplayWindow(parent=self, camera=self.camera)
 
 
 def launch_gui(

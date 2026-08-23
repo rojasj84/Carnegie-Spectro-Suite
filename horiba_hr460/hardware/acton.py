@@ -86,9 +86,17 @@ class ActonSpectrometer:
             try:
                 model = self._send("MODEL")
                 serial_no = self._send("SERIAL")
+                if model:
+                    self.config.instrument_model = f"Acton {model}"
                 logger.info(f"Acton SpectraPro identified as MODEL={model!r} SERIAL={serial_no!r}")
             except Exception as ex:
                 logger.debug(f"Could not read Acton MODEL/SERIAL: {ex}")
+
+            try:
+                self.read_installed_gratings()
+                self.read_active_grating()
+            except Exception as ex:
+                logger.debug(f"Could not read Acton gratings: {ex}")
 
             self.status = MonochromatorStatus.READY
             self.read_position()
@@ -220,6 +228,50 @@ class ActonSpectrometer:
         self.read_position()
         return True
 
+    def read_active_grating(self) -> int:
+        """Query currently selected grating index (0-based) using '?GRATING'."""
+        if not self.ser:
+            return self._active_grating_idx
+        try:
+            resp = self._send("?GRATING")
+            m = re.search(r"\d+", resp)
+            if m:
+                grating_num = int(m.group())
+                self._active_grating_idx = max(0, grating_num - 1)
+                self.config.active_grating_index = self._active_grating_idx
+        except Exception as ex:
+            logger.debug(f"Could not query ?GRATING: {ex}")
+        return self._active_grating_idx
+
+    def read_installed_gratings(self) -> List[GratingConfig]:
+        """Query installed gratings from firmware using '?GRATINGS'."""
+        if not self.ser:
+            return self.config.gratings
+        try:
+            resp = self._send("?GRATINGS", timeout=3.0)
+            parsed: List[GratingConfig] = []
+            for line in resp.splitlines():
+                line = line.strip(" \r\n\t\x1a")
+                if not line or line.lower() == "ok" or "not installed" in line.lower():
+                    continue
+                m = re.match(r"(\d+)\s+([0-9.]+)\s*g/mm(?:\s+BLZ=\s*([^\s]+))?", line, re.IGNORECASE)
+                if m:
+                    grooves = float(m.group(2))
+                    prev_g = self.config.gratings[len(parsed)] if len(parsed) < len(self.config.gratings) else None
+                    g = GratingConfig(
+                        grating_grooves_per_mm=grooves,
+                        spectrometer_pos_nm=self._current_wavelength_nm,
+                        slit_size=self._current_slit_size,
+                        laser_wavelength=prev_g.laser_wavelength if prev_g else 532.0,
+                        accumulations=prev_g.accumulations if prev_g else 1
+                    )
+                    parsed.append(g)
+            if parsed:
+                self.config.gratings = parsed
+        except Exception as ex:
+            logger.debug(f"Could not query ?GRATINGS: {ex}")
+        return self.config.gratings
+
 
 class MockActonSpectrometer(ActonSpectrometer):
     """
@@ -239,6 +291,12 @@ class MockActonSpectrometer(ActonSpectrometer):
 
     def disconnect(self) -> None:
         self.status = MonochromatorStatus.DISCONNECTED
+
+    def read_active_grating(self) -> int:
+        return self.config.active_grating_index
+
+    def read_installed_gratings(self) -> List[GratingConfig]:
+        return self.config.gratings
 
     def hard_initialize(self) -> bool:
         time.sleep(0.2)

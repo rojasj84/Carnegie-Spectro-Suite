@@ -152,6 +152,8 @@ class VBFormApp(tk.Tk):
         view_menu.add_command(label="Autoscale View (AutoXY)", command=self._on_autoscale)
         view_menu.add_checkbutton(label="Big Cursor", command=self._toggle_big_cursor)
         view_menu.add_separator()
+        view_menu.add_command(label="📷 Live Camera Viewer (2D Display)...", accelerator="Ctrl+K", command=self._open_camera_view)
+        view_menu.add_separator()
         view_menu.add_command(label="Clear Overlaid Spectra", command=self._clear_loaded_spectra)
         menubar.add_cascade(label="View", menu=view_menu)
 
@@ -255,6 +257,8 @@ class VBFormApp(tk.Tk):
         ttk.Button(self.toolbar_frame, text="📐 AutoXY", width=8, command=self._on_autoscale).pack(side="left", padx=2, pady=2)
         ttk.Button(self.toolbar_frame, text="🧩 Glue...", width=8, command=self._open_glue_dialog).pack(side="left", padx=2, pady=2)
         ttk.Button(self.toolbar_frame, text="⚙ Props...", width=8, command=self._open_properties_dialog).pack(side="left", padx=2, pady=2)
+        ttk.Separator(self.toolbar_frame, orient="vertical").pack(side="left", fill="y", padx=4, pady=2)
+        ttk.Button(self.toolbar_frame, text="📷 Camera View", width=14, command=self._open_camera_view).pack(side="left", padx=2, pady=2)
 
     def _build_action_bar(self):
         self.action_frame = ttk.Frame(self, padding=(6, 4))
@@ -280,6 +284,10 @@ class VBFormApp(tk.Tk):
         self.btn_stop_main = tk.Button(self.action_frame, text="STOP", width=8, font=("Tahoma", 9, "bold"),
                                        bg="#FFD0D0", fg="#AA0000", relief="raised", command=self._on_stop)
         self.btn_stop_main.pack(side="left", padx=3)
+
+        self.btn_cam_view_main = tk.Button(self.action_frame, text="📷 Camera View", font=("Tahoma", 9, "bold"),
+                                           bg="#E0ECF8", relief="raised", command=self._open_camera_view)
+        self.btn_cam_view_main.pack(side="left", padx=5)
 
         # Hardware connection icon / status badge
         self.lbl_conn_indicator = tk.Label(self.action_frame, text="● HR460", font=("Tahoma", 9, "bold"),
@@ -407,6 +415,9 @@ class VBFormApp(tk.Tk):
         self.txt_temp.pack(side="right")
         self.txt_temp.bind("<Return>", self._on_update_temp)
 
+        # Camera View Button
+        ttk.Button(right_panel, text="📷 Live Camera Viewer...", command=self._open_camera_view).pack(fill="x", pady=(6, 4))
+
     def _style_vb_plot(self):
         self.ax.set_facecolor("#000000") # Classic black canvas of Picture1
         self.fig.patch.set_facecolor("#D4D0C8") # Classic Windows gray surrounding
@@ -456,11 +467,10 @@ class VBFormApp(tk.Tk):
         def _task():
             mono_ok = self.mono.connect()
             cam_ok = self.camera.connect()
-            if not cam_ok and not self.force_mock:
-                self.camera = create_camera(self.sp_config, force_mock=True)
-                self.camera.connect()
-
-            self.after(0, self._on_connect_done)
+            try:
+                self.after(0, self._on_connect_done)
+            except Exception:
+                pass
 
         threading.Thread(target=_task, daemon=True).start()
 
@@ -472,8 +482,17 @@ class VBFormApp(tk.Tk):
         else:
             self.lbl_conn_indicator.config(text="● CONNECTED", fg="#008800")
 
+        # Synchronize calibration and grating UI with hardware-polled configuration
+        self.calibration = OpticalCalibration(self.sp_config.active_grating, self.sp_config.num_pixels)
+        self.stitcher = SpectrumStitcher(self.calibration)
+        self._populate_grating_combobox()
+
         self.sbr_status.config(text=f"Status: {self.mono.status.value}")
         self.sbr_pos.config(text=f"Position: {self.mono.current_wavelength_nm:.2f} nm")
+        self.sbr_grating.config(text=f"Grating: {self.sp_config.active_grating.grating_grooves_per_mm:.0f} g/mm")
+        if hasattr(self, "sbr_model"):
+            self.sbr_model.config(text=f"Model: {self.sp_config.instrument_model}")
+
         self.pos_hr460.delete(0, "end")
         self.pos_hr460.insert(0, f"{self.mono.current_wavelength_nm:.2f}")
         self._refresh_plot()
@@ -877,6 +896,16 @@ class VBFormApp(tk.Tk):
             self.sp_config.save_legacy_cfg(path)
         messagebox.showinfo("Config Saved", f"Configuration saved to {os.path.basename(path)}")
 
+    def _populate_grating_combobox(self):
+        """Populate grating combobox dropdown with available gratings from active config."""
+        if hasattr(self, "cmb_grating") and self.sp_config and self.sp_config.gratings:
+            grating_vals = [
+                f"{g.grating_grooves_per_mm:.0f}" for g in self.sp_config.gratings
+            ]
+            self.cmb_grating.config(values=grating_vals)
+            active_idx = min(max(0, self.sp_config.active_grating_index), len(self.sp_config.gratings) - 1)
+            self.cmb_grating.set(f"{self.sp_config.gratings[active_idx].grating_grooves_per_mm:.0f}")
+
     def _on_load_config(self):
         path = filedialog.askopenfilename(filetypes=[("Config Files (*.cfg;*.json)", "*.cfg;*.json")])
         if not path:
@@ -886,8 +915,7 @@ class VBFormApp(tk.Tk):
         else:
             self.sp_config = SpectrometerConfig.from_legacy_cfg(path)
         self.calibration = OpticalCalibration(self.sp_config.active_grating, self.sp_config.num_pixels)
-        self.cmb_grating.config(values=[f"{g.grating_grooves_per_mm:.0f}" for g in self.sp_config.gratings])
-        self.cmb_grating.set(f"{self.sp_config.active_grating.grating_grooves_per_mm:.0f}")
+        self._populate_grating_combobox()
         self.pos_hr460.delete(0, "end")
         self.pos_hr460.insert(0, f"{self.sp_config.active_grating.spectrometer_pos_nm:.2f}")
         self._refresh_plot()
@@ -936,12 +964,47 @@ class VBFormApp(tk.Tk):
         self._update_window_title()
 
         if hasattr(self, "call_menu"):
-            self.call_menu.entryconfigure(0, label=f"Model: {self.sp_config.instrument_model}")
+            try:
+                idx = getattr(self, "mnu_spectrometer_model_index", 0)
+                self.call_menu.entryconfigure(idx, label=f"Model: {self.sp_config.instrument_model}")
+            except Exception:
+                pass
 
         self._populate_grating_combobox()
+
+        if hasattr(self, "txt_time"):
+            self.txt_time.delete(0, "end")
+            self.txt_time.insert(0, f"{self.sp_config.active_grating.exposure_time_sec:.2f}")
+        if hasattr(self, "pos_hr460"):
+            self.pos_hr460.delete(0, "end")
+            self.pos_hr460.insert(0, f"{self.sp_config.active_grating.spectrometer_pos_nm:.2f}")
+        if hasattr(self, "txt_slit"):
+            self.txt_slit.delete(0, "end")
+            self.txt_slit.insert(0, f"{self.sp_config.active_grating.slit_size:.0f}")
+        if hasattr(self, "cmb_laser"):
+            self.cmb_laser.delete(0, "end")
+            self.cmb_laser.insert(0, f"{self.sp_config.active_grating.laser_wavelength:.3f}")
+
+        if hasattr(self, "sbr_model"):
+            self.sbr_model.config(text=f"Model: {self.sp_config.instrument_model}")
+        if hasattr(self, "sbr_port"):
+            self.sbr_port.config(text=f"Port: {self.sp_config.com_port} {self.sp_config.baudrate},N,8,1")
+        if hasattr(self, "sbr_grating"):
+            self.sbr_grating.config(text=f"Grating: {self.sp_config.active_grating.grating_grooves_per_mm:.0f} g/mm")
+        if hasattr(self, "sbr_pos"):
+            self.sbr_pos.config(text=f"Position: {self.sp_config.active_grating.spectrometer_pos_nm:.2f} nm")
+
         self.mono = create_spectrometer(self.sp_config, force_mock=self.force_mock)
         self.camera = create_camera(self.sp_config, force_mock=self.force_mock)
         self._connect_hardware_async()
+
+    def _open_camera_view(self):
+        from .camera_view import CameraDisplayWindow
+        if hasattr(self, "_cam_win") and self._cam_win and self._cam_win.winfo_exists():
+            self._cam_win.lift()
+            self._cam_win.focus_force()
+            return
+        self._cam_win = CameraDisplayWindow(parent=self, camera=self.camera)
 
     def _open_properties_dialog(self):
         PropertiesDialog(self)

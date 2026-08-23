@@ -154,12 +154,12 @@ class DeviceSelectorDialog:
 
         # Camera / Detector Driver
         ttk.Label(grid, text="Detector:", width=15).grid(row=1, column=2, sticky="w", padx=(15, 0), pady=4)
-        self.var_camera = tk.StringVar(value="PI MTE USB Camera")
+        self.var_camera = tk.StringVar(value="FLIR Blackfly S BFS-U3")
         self.cbo_camera = ttk.Combobox(
             grid,
             textvariable=self.var_camera,
-            values=["PI MTE USB Camera", "Simulated Detector (Demo)", "Custom / Other"],
-            width=18
+            values=["FLIR Blackfly S BFS-U3", "PI MTE USB Camera", "Simulated Detector (Demo)", "Custom / Other"],
+            width=22
         )
         self.cbo_camera.grid(row=1, column=3, sticky="w", padx=5, pady=4)
 

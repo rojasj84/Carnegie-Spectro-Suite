@@ -87,3 +87,14 @@ class MockCamera:
         data += shot_noise
 
         return np.maximum(data, 0.0), 1
+
+    def grab_2d_frame(self, color_mode: str = "RGB", timeout_ms: int = 2000) -> Optional[np.ndarray]:
+        """Grab a 2D frame from the simulated detector."""
+        spec, _ = self.acquire_frame(exposure_time_sec=0.03)
+        h = max(64, self.num_pixels // 4)
+        mx = float(np.max(spec)) if len(spec) > 0 else 1.0
+        norm = np.clip(spec / (mx if mx > 0 else 1.0) * 255.0, 0, 255).astype(np.uint8)
+        mono_2d = np.tile(norm, (h, 1))
+        if color_mode.upper() == "RGB":
+            return np.stack([mono_2d] * 3, axis=-1)
+        return mono_2d

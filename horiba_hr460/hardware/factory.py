@@ -12,6 +12,7 @@ from .hr460 import HoribaHR460, MockHoribaHR460
 from .acton import ActonSpectrometer, MockActonSpectrometer
 from .camera import MockCamera
 from .pimte import PIMTECamera
+from .blackfly import BlackflySCamera, MockBlackflySCamera
 
 
 def create_spectrometer(config: SpectrometerConfig, force_mock: bool = False) -> Spectrometer:
@@ -29,12 +30,17 @@ def create_spectrometer(config: SpectrometerConfig, force_mock: bool = False) ->
 def create_camera(config: SpectrometerConfig, force_mock: bool = False) -> Camera:
     """
     Instantiate the Camera/Detector driver named by config.camera_model.
-    Supports PI MTE USB Camera, simulated detectors, and extensible camera drivers.
+    Supports FLIR Blackfly S (BFS-U3), PI MTE USB Camera, simulated detectors, and extensible camera drivers.
     """
+    cam_model = getattr(config, "camera_model", "SIMULATED").upper()
+
     if force_mock:
+        if any(k in cam_model for k in ("FLIR", "BLACKFLY", "BFS", "SPINNAKER")):
+            return MockBlackflySCamera(config.num_pixels)
         return MockCamera(config.num_pixels)
 
-    cam_model = getattr(config, "camera_model", "SIMULATED").upper()
+    if any(k in cam_model for k in ("FLIR", "BLACKFLY", "BFS", "SPINNAKER")):
+        return BlackflySCamera(num_pixels=config.num_pixels)
 
     if any(k in cam_model for k in ("MTE", "PRINCETON", "PIMTE", "PIXIS", "PICAM")):
         return PIMTECamera(num_pixels=config.num_pixels)
