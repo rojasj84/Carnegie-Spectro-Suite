@@ -117,6 +117,25 @@ E. 10-Field Hardware Experiment Block (PIXCM32.dll 0x28F80):
        clean_cycles   # uint16: 1 = Pre-exposure flush
    )
 
+F. WinX32 COM / ActiveX Automation Architecture (from WinX32_Automation_3X_for_Visual_Basic.pdf):
+   In Visual Basic 6 (VB6), external applications automate WinSpec using its embedded COM Type Library (WINX32Lib):
+   - Objects Used:
+     * ExpSetup (ProgID "WinX32.ExpSetup"): Manages exposure parameters and triggers acquisition.
+     * DocFile (ProgID "WinX32.DocFile"): Receives the acquired frame buffer and saves SPE files.
+     * WinX32App (ProgID "WinX32.Winx32App"): Main application controller.
+   - Core Acquisition Pattern:
+     Dim objExp As New ExpSetup
+     Dim objDoc As New DocFile
+     objExp.SetParam EXP_EXPOSURE, 0.1  ' Set exposure in seconds
+     objExp.SetParam EXP_ACCUMS, 1      ' Set accumulation count
+     If objExp.Start(objDoc) Then       ' Triggers hardware acquisition
+       While objExp.GetParam(EXP_RUNNING, intStatus) And intStatus = 0
+         DoEvents                       ' Wait for frame completion
+       Wend
+       Dim vntFrame As Variant
+       objDoc.GetFrame 1, vntFrame      ' Retrieves 512 raw counts
+     End If
+
 --------------------------------------------------------------------------------
  5. RECOMMENDED STRATEGIES TO ACHIEVE 64-BIT READOUT
 --------------------------------------------------------------------------------
