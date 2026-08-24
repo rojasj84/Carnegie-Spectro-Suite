@@ -71,6 +71,8 @@ class Camera(Protocol):
         stop_requested: Optional[Callable[[], bool]] = None
     ) -> Tuple[np.ndarray, int]: ...
 
+    def get_temperature(self) -> Optional[dict]: ...
+
 
 # Alias for camera/detector parity
 Detector = Camera

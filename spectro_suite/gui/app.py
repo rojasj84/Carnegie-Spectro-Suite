@@ -90,7 +90,9 @@ class HoribaApp(ctk.CTk):
 
         # Build UI layout
         self._create_layout()
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
         self._connect_hardware_async()
+        self._start_temperature_poller()
 
     def _find_default_config(self) -> Optional[str]:
         candidates = ["config_acton_sp2150.json", "Wsp-460.cfg", "DEFAULT.CFG", "wsp-460.cfg"]
@@ -328,6 +330,9 @@ class HoribaApp(ctk.CTk):
         self.status_cam = ctk.CTkLabel(self.statusbar, text="Camera: Connecting...", font=ctk.CTkFont(size=11))
         self.status_cam.pack(side="left", padx=15)
 
+        self.status_temp = ctk.CTkLabel(self.statusbar, text="CCD Temp: --.- °C", font=ctk.CTkFont(size=11, weight="bold"), text_color="#10B981")
+        self.status_temp.pack(side="left", padx=15)
+
         self.status_action = ctk.CTkLabel(self.statusbar, text="Ready", font=ctk.CTkFont(size=11, weight="bold"))
         self.status_action.pack(side="right", padx=15)
 
@@ -347,6 +352,13 @@ class HoribaApp(ctk.CTk):
         self.status_hw.configure(text="Monochromator: Connecting...")
         self._connect_hardware_async()
 
+    def _safe_ui(self, fn: Callable[[], Any]) -> None:
+        """Safely execute a UI operation on the main Tkinter thread."""
+        try:
+            self.after(0, fn)
+        except Exception:
+            pass
+
     def _connect_hardware_async(self):
         def _task():
             mono_ok = self.mono.connect()
@@ -360,7 +372,7 @@ class HoribaApp(ctk.CTk):
                 self.mono = create_spectrometer(self.config, force_mock=True)
                 self.mono.connect()
 
-            self.after(0, self._update_connection_status)
+            self._safe_ui(self._update_connection_status)
 
         threading.Thread(target=_task, daemon=True).start()
 
@@ -376,9 +388,60 @@ class HoribaApp(ctk.CTk):
         else:
             self.status_hw.configure(text=f"Monochromator: {self.mono.status.value}")
 
-        cam_type = "Simulated (Mock)" if self.camera.is_mock else getattr(self.config, "camera_model", "Connected")
+        cam_name = getattr(self.camera, "_camera_name", getattr(self.config, "camera_model", "Connected"))
+        cam_type = "Simulated (Mock)" if getattr(self.camera, "is_mock", False) else cam_name
         self.status_cam.configure(text=f"Detector: {cam_type}")
         self._refresh_plot()
+        self._update_temperature_ui()
+
+    def _update_temperature_ui(self):
+        """Query and update CCD / InGaAs temperature readout."""
+        try:
+            if hasattr(self, "camera") and self.camera:
+                temp_info = None
+                if hasattr(self.camera, "get_temperature"):
+                    temp_info = self.camera.get_temperature()
+
+                if temp_info and "temperature_c" in temp_info:
+                    is_sim = temp_info.get("is_simulated", False)
+                    t_val = temp_info["temperature_c"]
+                    st_str = temp_info.get("status_str", "")
+                    stat_code = temp_info.get("status", 2)
+
+                    if is_sim:
+                        txt = "Detector Temp: Offline (Simulated)"
+                        fg = "#9CA3AF"
+                    elif st_str:
+                        txt = f"Detector Temp: {t_val:.1f} °C [{st_str}]"
+                        fg = "#10B981" if stat_code == 2 else ("#F59E0B" if stat_code == 1 else "#EF4444")
+                    else:
+                        txt = f"Detector Temp: {t_val:.1f} °C"
+                        fg = "#10B981" if stat_code == 2 else ("#F59E0B" if stat_code == 1 else "#EF4444")
+
+                    self._safe_ui(lambda t=txt, c=fg: self.status_temp.configure(text=t, text_color=c))
+                else:
+                    self._safe_ui(lambda: self.status_temp.configure(text="Detector Temp: Offline", text_color="#9CA3AF"))
+        except Exception:
+            pass
+
+    def _start_temperature_poller(self):
+        """Periodically poll CCD detector temperature and update status bar."""
+        self._temp_poller_running = True
+
+        def _poll_loop():
+            while getattr(self, "_temp_poller_running", True):
+                self._update_temperature_ui()
+                time.sleep(2.0)
+
+        threading.Thread(target=_poll_loop, daemon=True).start()
+
+    def _on_window_close(self):
+        self._temp_poller_running = False
+        self.stop_requested = True
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _refresh_plot(self):
         self.current_raw_wavelengths = self.calibration.get_pixel_wavelengths(

@@ -75,7 +75,7 @@ def get_default_profiles() -> Dict[str, SpectrometerConfig]:
         instrument_model="HR460",
         com_port="COM1",
         baudrate=9600,
-        camera_model="SIMULATED",
+        camera_model="PI MTE USB Camera",
         num_pixels=1024,
         gratings=[
             GratingConfig(

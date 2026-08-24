@@ -126,8 +126,12 @@ class VBFormApp(tk.Tk):
         self._build_body()
         self._build_statusbar()
 
-        # Connect hardware in background
+        # Window close handler
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
+
+        # Connect hardware and start background monitoring
         self._connect_hardware_async()
+        self._start_temperature_poller()
 
     def _find_default_config(self) -> Optional[str]:
         candidates = ["config_acton_sp2150.json", "Wsp-460.cfg", "DEFAULT.CFG", "wsp-460.cfg"]
@@ -465,6 +469,9 @@ class VBFormApp(tk.Tk):
         self.sbr_status = ttk.Label(self.statusbar, text="Status: Ready", relief="groove", padding=(6, 2), font=("Tahoma", 8))
         self.sbr_status.pack(side="left", fill="x", expand=True, padx=1)
 
+        self.sbr_temp = ttk.Label(self.statusbar, text="CCD Temp: --.- °C", relief="groove", padding=(4, 2), font=("Tahoma", 8, "bold"), foreground="#006600")
+        self.sbr_temp.pack(side="left", padx=1)
+
         self.sbr_time = ttk.Label(self.statusbar, text="Time Left: 0.0s", relief="groove", padding=(4, 2), font=("Tahoma", 8))
         self.sbr_time.pack(side="left", padx=1)
 
@@ -478,6 +485,57 @@ class VBFormApp(tk.Tk):
         """Safely execute a UI operation on the main Tkinter thread."""
         try:
             self.after(0, fn)
+        except Exception:
+            pass
+
+    def _update_temperature_ui(self):
+        """Query and display CCD detector temperature on the status bar."""
+        try:
+            if hasattr(self, "camera") and self.camera:
+                temp_info = None
+                if hasattr(self.camera, "get_temperature"):
+                    temp_info = self.camera.get_temperature()
+
+                if temp_info and "temperature_c" in temp_info:
+                    is_sim = temp_info.get("is_simulated", False)
+                    t_val = temp_info["temperature_c"]
+                    st_str = temp_info.get("status_str", "")
+                    stat_code = temp_info.get("status", 2)
+
+                    if is_sim:
+                        txt = "Detector Temp: Offline (Simulated)"
+                        fg = "#888888"
+                    elif st_str:
+                        txt = f"Detector Temp: {t_val:.1f} °C [{st_str}]"
+                        fg = "#008800" if stat_code == 2 else ("#CC6600" if stat_code == 1 else "#CC0000")
+                    else:
+                        txt = f"Detector Temp: {t_val:.1f} °C"
+                        fg = "#008800" if stat_code == 2 else ("#CC6600" if stat_code == 1 else "#CC0000")
+
+                    self._safe_ui(lambda t=txt, c=fg: self.sbr_temp.config(text=t, foreground=c))
+                else:
+                    self._safe_ui(lambda: self.sbr_temp.config(text="Detector Temp: Offline", foreground="#888888"))
+        except Exception:
+            pass
+
+    def _start_temperature_poller(self):
+        """Periodically poll CCD sensor temperature and lock status."""
+        self._temp_poller_running = True
+
+        def _poll_loop():
+            while getattr(self, "_temp_poller_running", True):
+                self._update_temperature_ui()
+                time.sleep(2.0)
+
+        t = threading.Thread(target=_poll_loop, daemon=True)
+        t.start()
+
+    def _on_window_close(self):
+        """Cleanly handle application window closing."""
+        self._temp_poller_running = False
+        self.stop_requested = True
+        try:
+            self.destroy()
         except Exception:
             pass
 
@@ -539,6 +597,7 @@ class VBFormApp(tk.Tk):
         self.pos_hr460.delete(0, "end")
         self.pos_hr460.insert(0, f"{self.mono.current_wavelength_nm:.2f}")
         self._refresh_plot()
+        self._update_temperature_ui()
 
     # =========================================================================
     # 6. PLOT REDRAW & RECALIBRATION (Replicating Picture1_Redraw & Recalibrate)

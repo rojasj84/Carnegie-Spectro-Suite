@@ -442,6 +442,27 @@ class BlackflySCamera:
             pass
         return self._gain_db
 
+    def get_temperature(self) -> Optional[dict]:
+        """Query camera internal temperature via Spinnaker GenICam DeviceTemperature node."""
+        if not self.is_connected or not self._h_cam.value:
+            return None
+        try:
+            h_nodemap = ctypes.c_void_p()
+            if self._spin.spinCameraGetNodeMap(self._h_cam, ctypes.byref(h_nodemap)) == 0:
+                h_temp = ctypes.c_void_p()
+                if self._spin.spinNodeMapGetNode(h_nodemap, b"DeviceTemperature", ctypes.byref(h_temp)) == 0:
+                    val = ctypes.c_double(0.0)
+                    if self._spin.spinFloatGetValue(h_temp, ctypes.byref(val)) == 0:
+                        return {
+                            "temperature_c": float(val.value),
+                            "setpoint_c": None,
+                            "status": 2,
+                            "status_str": "OK",
+                        }
+        except Exception:
+            pass
+        return None
+
     def disconnect(self) -> None:
         """Safely release camera, image processor, camera list, and Spinnaker system."""
         with self._lock:
@@ -570,3 +591,11 @@ class MockBlackflySCamera(BlackflySCamera):
 
     def get_gain(self) -> float:
         return self._gain_db
+
+    def get_temperature(self) -> Optional[dict]:
+        return {
+            "temperature_c": 35.5,
+            "setpoint_c": None,
+            "status": 2,
+            "status_str": "OK",
+        }

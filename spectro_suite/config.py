@@ -52,7 +52,7 @@ class SpectrometerConfig:
     active_grating_index: int = 0          # 0 for Grating 1, 1 for Grating 2
     num_pixels: int = 1024                 # Detector pixel count (e.g., 1024, 1340, 1400)
     instrument_model: str = "HR460"        # Spectrometer driver to use: "HR460", "ACTON", etc.
-    camera_model: str = "SIMULATED"        # Detector driver to use: "SIMULATED", "PIMTE", "WINSPEC", etc.
+    camera_model: str = "PI MTE USB Camera" # Detector driver: "PI MTE USB Camera", "WINSPEC", "BLACKFLY", etc.
     com_port: str = "COM1"                 # Serial COM port for the spectrometer controller
     baudrate: int = 9600                   # Serial baudrate
     spe_data_path: str = "calib.spe"       # Path for temporary SPE acquisition transfer

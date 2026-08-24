@@ -7,7 +7,7 @@ import numpy as np
 from spectro_suite.config import SpectrometerConfig
 from spectro_suite.hardware.factory import create_spectrometer, create_camera, create_detector
 from spectro_suite.hardware.spectrometers import HoribaHR460, MockHoribaHR460, ActonSpectrometer, MockActonSpectrometer
-from spectro_suite.hardware.detectors import MockCamera, PIMTECamera, WinSpecController, MockWinSpecCamera
+from spectro_suite.hardware.detectors import MockCamera, PIMTECamera, WinSpecController, MockWinSpecCamera, MockBlackflySCamera
 
 
 class TestSpectrometerFactory(unittest.TestCase):
@@ -78,6 +78,14 @@ class TestCameraFactory(unittest.TestCase):
         data, frame_idx = cam.acquire_frame(exposure_time_sec=0.01)
         self.assertTrue(np.issubdtype(data.dtype, np.integer))
         self.assertEqual(len(data), cam.num_pixels)
+
+    def test_camera_temperature_readout(self):
+        for cam in [MockCamera(), PIMTECamera(), MockBlackflySCamera(), WinSpecController(), MockWinSpecCamera()]:
+            cam.connect()
+            temp_info = cam.get_temperature()
+            self.assertIsNotNone(temp_info)
+            self.assertIn("temperature_c", temp_info)
+            self.assertIsInstance(temp_info["temperature_c"], (int, float))
 
 
 if __name__ == "__main__":

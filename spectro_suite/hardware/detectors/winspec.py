@@ -96,6 +96,44 @@ class WinSpecController:
 
         return data_array, max_pix_x
 
+    def get_temperature(self) -> Optional[dict]:
+        """Query detector temperature via WinSpec32 COM automation or simulation."""
+        if self.is_connected and self.exp_setup:
+            temp_val = None
+            for p_id in [106, 711]:
+                try:
+                    val = float(self.exp_setup.GetParam(p_id))
+                    if val != 0.0 or temp_val is None:
+                        temp_val = val
+                        break
+                except Exception:
+                    pass
+
+            set_val = 0.0
+            for p_id in [105, 710]:
+                try:
+                    set_val = float(self.exp_setup.GetParam(p_id))
+                    break
+                except Exception:
+                    pass
+
+            if temp_val is not None:
+                return {
+                    "temperature_c": temp_val,
+                    "setpoint_c": set_val,
+                    "status": 2,
+                    "status_str": "LOCKED",
+                    "is_simulated": False,
+                }
+
+        return {
+            "temperature_c": -120.0,
+            "setpoint_c": -120.0,
+            "status": 2,
+            "status_str": "LOCKED",
+            "is_simulated": True,
+        }
+
 
 class MockWinSpecCamera:
     """
@@ -158,3 +196,12 @@ class MockWinSpecCamera:
         spectrum += ruby_r1 + ruby_r2
 
         return np.round(np.maximum(0.0, spectrum)).astype(np.int64), n_pix
+
+    def get_temperature(self) -> Optional[dict]:
+        """Simulate CCD sensor temperature."""
+        return {
+            "temperature_c": -120.0,
+            "setpoint_c": -120.0,
+            "status": 2,
+            "status_str": "LOCKED",
+        }

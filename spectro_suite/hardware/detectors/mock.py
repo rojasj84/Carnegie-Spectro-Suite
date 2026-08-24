@@ -96,6 +96,16 @@ class MockCamera:
             return np.stack([mono_2d] * 3, axis=-1)
         return mono_2d
 
+    def get_temperature(self) -> Optional[dict]:
+        """Simulate CCD sensor temperature indicator."""
+        return {
+            "temperature_c": -120.0,
+            "setpoint_c": -120.0,
+            "status": 2,
+            "status_str": "SIMULATED",
+            "is_simulated": True,
+        }
+
 
 # Alias for detector terminology parity
 MockDetector = MockCamera
