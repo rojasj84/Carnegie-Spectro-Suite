@@ -41,8 +41,8 @@ class TestHardwareDrivers(unittest.TestCase):
     def test_mock_camera_acquisition(self):
         self.assertTrue(self.mock_cam.connect())
         spectrum, n_pix = self.mock_cam.acquire_frame(exposure_time_sec=0.1)
-        self.assertEqual(n_pix, 1024)
-        self.assertEqual(len(spectrum), 1024)
+        self.assertEqual(n_pix, self.config.num_pixels)
+        self.assertEqual(len(spectrum), self.config.num_pixels)
         self.assertGreater(spectrum.max(), 0.0)
 
 

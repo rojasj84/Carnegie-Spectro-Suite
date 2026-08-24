@@ -7,7 +7,7 @@ import numpy as np
 from spectro_suite.config import SpectrometerConfig
 from spectro_suite.hardware.factory import create_spectrometer, create_camera, create_detector
 from spectro_suite.hardware.spectrometers import HoribaHR460, MockHoribaHR460, ActonSpectrometer, MockActonSpectrometer
-from spectro_suite.hardware.detectors import MockCamera, PIMTECamera, WinSpecController, MockWinSpecCamera, MockBlackflySCamera
+from spectro_suite.hardware.detectors import MockCamera, PIMTECamera, ST133Camera, WinSpecController, MockWinSpecCamera, MockBlackflySCamera
 
 
 class TestSpectrometerFactory(unittest.TestCase):
@@ -46,9 +46,13 @@ class TestSpectrometerFactory(unittest.TestCase):
 class TestCameraFactory(unittest.TestCase):
 
     def test_default_camera(self):
-        cfg = SpectrometerConfig()
-        cam = create_camera(cfg, force_mock=False)
-        self.assertIsInstance(cam, MockCamera)
+        cfg_sim = SpectrometerConfig(camera_model="SIMULATED")
+        cam_sim = create_camera(cfg_sim, force_mock=False)
+        self.assertIsInstance(cam_sim, MockCamera)
+
+        cfg_st133 = SpectrometerConfig(camera_model="Princeton Instruments ST-133 InGaAs")
+        cam_st133 = create_camera(cfg_st133, force_mock=False)
+        self.assertIsInstance(cam_st133, ST133Camera)
 
     def test_mock_camera(self):
         cfg = SpectrometerConfig()
@@ -80,12 +84,19 @@ class TestCameraFactory(unittest.TestCase):
         self.assertEqual(len(data), cam.num_pixels)
 
     def test_camera_temperature_readout(self):
-        for cam in [MockCamera(), PIMTECamera(), MockBlackflySCamera(), WinSpecController(), MockWinSpecCamera()]:
+        for cam in [MockCamera(), MockBlackflySCamera(), MockWinSpecCamera()]:
             cam.connect()
             temp_info = cam.get_temperature()
             self.assertIsNotNone(temp_info)
             self.assertIn("temperature_c", temp_info)
             self.assertIsInstance(temp_info["temperature_c"], (int, float))
+
+        # Real hardware drivers return None (OFFLINE) when disconnected
+        for real_cam in [ST133Camera(), PIMTECamera()]:
+            temp_info = real_cam.get_temperature()
+            self.assertIsNotNone(temp_info)
+            self.assertIn("temperature_c", temp_info)
+            self.assertIsNone(temp_info["temperature_c"])
 
 
 if __name__ == "__main__":

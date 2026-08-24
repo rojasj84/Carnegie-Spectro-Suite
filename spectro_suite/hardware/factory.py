@@ -53,8 +53,8 @@ def create_camera(config: SpectrometerConfig, force_mock: bool = False) -> Camer
     if any(k in cam_model for k in ("FLIR", "BLACKFLY", "BFS", "SPINNAKER")):
         return BlackflySCamera(num_pixels=config.num_pixels)
 
-    if any(k in cam_model for k in ("MTE", "PRINCETON", "PIMTE", "PIXIS", "PICAM")):
-        return ST133Camera(num_pixels=config.num_pixels)
+    if any(k in cam_model for k in ("MTE", "PIMTE", "PIXIS", "PICAM")):
+        return PIMTECamera(num_pixels=config.num_pixels)
 
     if "WINSPEC" in cam_model:
         try:
