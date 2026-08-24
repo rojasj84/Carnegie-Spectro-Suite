@@ -1,8 +1,7 @@
-import sys
 from spectro_suite.hardware.detectors.pimte import PIMTECamera
 
-cam = PIMTECamera(num_pixels=1024)
-print("Connecting to PIMTECamera...")
+cam = PIMTECamera(num_pixels=512)
+print("Connecting to PIMTECamera (512 pixels)...")
 ok = cam.connect()
 print(f"Connected: {ok}")
 

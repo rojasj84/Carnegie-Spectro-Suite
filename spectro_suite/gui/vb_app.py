@@ -106,7 +106,7 @@ class VBFormApp(tk.Tk):
         )
         self.current_spectrum = np.zeros(self.sp_config.num_pixels, dtype=np.float32)
         self.loaded_spectra: Dict[int, Tuple[str, np.ndarray, np.ndarray]] = {} # index -> (name, x, y)
-        self.current_unit = Units.NM
+        self.current_unit = Units.PIXEL
         self.cosmic_filter_mode = "Median" # "Threshold", "Median", "Off"
         self.cosmic_threshold = 100.0
         self.is_acquiring = False
@@ -496,14 +496,14 @@ class VBFormApp(tk.Tk):
                 if hasattr(self.camera, "get_temperature"):
                     temp_info = self.camera.get_temperature()
 
-                if temp_info and "temperature_c" in temp_info:
+                if temp_info:
                     is_sim = temp_info.get("is_simulated", False)
-                    t_val = temp_info["temperature_c"]
+                    t_val = temp_info.get("temperature_c")
                     st_str = temp_info.get("status_str", "")
-                    stat_code = temp_info.get("status", 2)
+                    stat_code = temp_info.get("status", 0)
 
-                    if is_sim:
-                        txt = "Detector Temp: Offline (Simulated)"
+                    if t_val is None or st_str == "OFFLINE" or is_sim:
+                        txt = "Detector Temp: OFFLINE"
                         fg = "#888888"
                     elif st_str:
                         txt = f"Detector Temp: {t_val:.1f} °C [{st_str}]"
@@ -514,7 +514,7 @@ class VBFormApp(tk.Tk):
 
                     self._safe_ui(lambda t=txt, c=fg: self.sbr_temp.config(text=t, foreground=c))
                 else:
-                    self._safe_ui(lambda: self.sbr_temp.config(text="Detector Temp: Offline", foreground="#888888"))
+                    self._safe_ui(lambda: self.sbr_temp.config(text="Detector Temp: OFFLINE", foreground="#888888"))
         except Exception:
             pass
 
@@ -610,6 +610,9 @@ class VBFormApp(tk.Tk):
             self.current_raw_wavelengths, self.current_unit
         )
 
+        if len(self.current_spectrum) != len(x_data):
+            self.current_spectrum = np.zeros(len(x_data), dtype=np.float32)
+
         self.line_active.set_data(x_data, self.current_spectrum)
 
         # Neon reference overlay
@@ -627,6 +630,10 @@ class VBFormApp(tk.Tk):
 
         self.ax.relim()
         self.ax.autoscale_view()
+        if len(x_data) > 1:
+            x_min, x_max = float(np.min(x_data)), float(np.max(x_data))
+            if x_min < x_max:
+                self.ax.set_xlim(x_min, x_max)
         self.ax.set_xlabel(f"Scale: {self.current_unit.value}", fontsize=9)
         self.ax.set_ylabel("Intensity (Counts)", fontsize=9)
         self.canvas.draw_idle()
@@ -861,8 +868,18 @@ class VBFormApp(tk.Tk):
         self.sbr_status.config(text="Status: Stopped by user")
 
     def _on_autoscale(self):
+        x_data = self.calibration.convert_wavelengths_to_units(
+            self.current_raw_wavelengths, self.current_unit
+        )
         self.ax.relim()
         self.ax.autoscale_view()
+        if len(x_data) > 1:
+            self.ax.set_xlim(float(np.min(x_data)), float(np.max(x_data)))
+        if len(self.current_spectrum) > 0:
+            y_min = float(np.min(self.current_spectrum))
+            y_max = float(np.max(self.current_spectrum))
+            margin = max(2.0, (y_max - y_min) * 0.1)
+            self.ax.set_ylim(max(0, y_min - margin), y_max + margin)
         self.canvas.draw_idle()
 
     # =========================================================================

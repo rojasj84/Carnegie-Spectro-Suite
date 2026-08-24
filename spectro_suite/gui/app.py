@@ -82,7 +82,7 @@ class HoribaApp(ctk.CTk):
         self.current_raw_wavelengths = self.calibration.get_pixel_wavelengths()
         self.current_spectrum = np.zeros(self.config.num_pixels, dtype=np.float32)
         self.reference_spectrum: Optional[np.ndarray] = None
-        self.current_unit = Units.NM
+        self.current_unit = Units.PIXEL
         self.is_acquiring = False
         self.focus_running = False
         self.stop_requested = False
@@ -461,6 +461,8 @@ class HoribaApp(ctk.CTk):
 
         self.ax.relim()
         self.ax.autoscale_view()
+        if len(x_data) > 1:
+            self.ax.set_xlim(float(np.min(x_data)), float(np.max(x_data)))
         self.ax.set_xlabel(f"{self.current_unit.value.capitalize()}", color="#FFFFFF")
         self.canvas.draw_idle()
 

@@ -16,6 +16,7 @@ from .detectors import (
     MockCamera,
     MockDetector,
     PIMTECamera,
+    ST133Camera,
     WinSpecController,
     BlackflySCamera,
     MockBlackflySCamera,
@@ -37,7 +38,7 @@ def create_spectrometer(config: SpectrometerConfig, force_mock: bool = False) ->
 def create_camera(config: SpectrometerConfig, force_mock: bool = False) -> Camera:
     """
     Instantiate the Camera/Detector driver named by config.camera_model.
-    Supports FLIR Blackfly S (BFS-U3), PI MTE USB Camera, WinSpec automation, simulated detectors, and extensible drivers.
+    Supports Princeton Instruments ST-133 / InGaAs, FLIR Blackfly S, PI MTE, WinSpec automation, and simulated detectors.
     """
     cam_model = getattr(config, "camera_model", "SIMULATED").upper()
 
@@ -46,11 +47,14 @@ def create_camera(config: SpectrometerConfig, force_mock: bool = False) -> Camer
             return MockBlackflySCamera(config.num_pixels)
         return MockCamera(config.num_pixels)
 
+    if any(k in cam_model for k in ("ST133", "ST-133", "OMA", "INGAAS", "7514")):
+        return ST133Camera(num_pixels=config.num_pixels)
+
     if any(k in cam_model for k in ("FLIR", "BLACKFLY", "BFS", "SPINNAKER")):
         return BlackflySCamera(num_pixels=config.num_pixels)
 
     if any(k in cam_model for k in ("MTE", "PRINCETON", "PIMTE", "PIXIS", "PICAM")):
-        return PIMTECamera(num_pixels=config.num_pixels)
+        return ST133Camera(num_pixels=config.num_pixels)
 
     if "WINSPEC" in cam_model:
         try:

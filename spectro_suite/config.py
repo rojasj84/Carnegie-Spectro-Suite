@@ -29,7 +29,7 @@ DEFAULT_LABELS = [
 class GratingConfig:
     """Optical parameters associated with a specific grating turret position."""
     laser_wavelength: float = 514.532       # Laser excitation wavelength (nm)
-    central_pixel: float = 512.0            # Optical center CCD pixel
+    central_pixel: float = 256.0            # Optical center CCD pixel
     grating_grooves_per_mm: float = 1800.0  # Grooves per mm (e.g., 1800, 1200, 300)
     inclusion_angle_rad: float = 0.288      # Monochromator inclusion angle in radians
     focal_length_mm: float = 460.0          # Spectrometer focal length (460 mm for HR460, 150 mm for SP2150)
@@ -46,11 +46,11 @@ class GratingConfig:
 class SpectrometerConfig:
     """Complete spectrometer and detector system configuration."""
     gratings: list[GratingConfig] = field(default_factory=lambda: [
-        GratingConfig(grating_grooves_per_mm=1800.0, spectrometer_pos_nm=700.0),
-        GratingConfig(grating_grooves_per_mm=300.0, spectrometer_pos_nm=700.0)
+        GratingConfig(grating_grooves_per_mm=1800.0, spectrometer_pos_nm=700.0, central_pixel=256.0),
+        GratingConfig(grating_grooves_per_mm=300.0, spectrometer_pos_nm=700.0, central_pixel=256.0)
     ])
     active_grating_index: int = 0          # 0 for Grating 1, 1 for Grating 2
-    num_pixels: int = 1024                 # Detector pixel count (e.g., 1024, 1340, 1400)
+    num_pixels: int = 512                  # Detector pixel count (e.g., 512, 1024, 1340)
     instrument_model: str = "HR460"        # Spectrometer driver to use: "HR460", "ACTON", etc.
     camera_model: str = "PI MTE USB Camera" # Detector driver: "PI MTE USB Camera", "WINSPEC", "BLACKFLY", etc.
     com_port: str = "COM1"                 # Serial COM port for the spectrometer controller
@@ -197,20 +197,21 @@ class SpectrometerConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SpectrometerConfig:
         """Create configuration from dictionary."""
+        cfg_data = data.get("saved_config", data)
         gratings = [
-            GratingConfig(**g_data) for g_data in data.get("gratings", [])
+            GratingConfig(**g_data) for g_data in cfg_data.get("gratings", [])
         ]
         if not gratings:
             gratings = [GratingConfig()]
         return cls(
             gratings=gratings,
-            active_grating_index=data.get("active_grating_index", 0),
-            num_pixels=data.get("num_pixels", 1024),
-            instrument_model=data.get("instrument_model", "HR460"),
-            camera_model=data.get("camera_model", "SIMULATED"),
-            com_port=data.get("com_port", "COM1"),
-            baudrate=data.get("baudrate", 9600),
-            spe_data_path=data.get("spe_data_path", "calib.spe"),
+            active_grating_index=cfg_data.get("active_grating_index", 0),
+            num_pixels=cfg_data.get("num_pixels", 512),
+            instrument_model=cfg_data.get("instrument_model", "HR460"),
+            camera_model=cfg_data.get("camera_model", "Princeton Instruments ST-133 InGaAs (512)"),
+            com_port=cfg_data.get("com_port", "COM1"),
+            baudrate=cfg_data.get("baudrate", 9600),
+            spe_data_path=cfg_data.get("spe_data_path", "calib.spe"),
         )
 
     def save_json(self, filepath: str) -> None:

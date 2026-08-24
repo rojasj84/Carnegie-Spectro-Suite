@@ -41,7 +41,7 @@ def get_default_profiles() -> Dict[str, SpectrometerConfig]:
             com_port="COM3",
             baudrate=9600,
             camera_model="PI MTE USB Camera",
-            num_pixels=1024,
+            num_pixels=512,
             gratings=[
                 GratingConfig(
                     grating_grooves_per_mm=300.0,
@@ -49,7 +49,7 @@ def get_default_profiles() -> Dict[str, SpectrometerConfig]:
                     laser_wavelength=1064.0,
                     focal_length_mm=150.0,
                     inclusion_angle_rad=0.288,
-                    central_pixel=512.0,
+                    central_pixel=256.0,
                     oma_element_size_mm=0.025,
                     slit_size=30.0,
                     exposure_time_sec=1.0,
@@ -61,7 +61,7 @@ def get_default_profiles() -> Dict[str, SpectrometerConfig]:
                     laser_wavelength=1064.0,
                     focal_length_mm=150.0,
                     inclusion_angle_rad=0.288,
-                    central_pixel=512.0,
+                    central_pixel=256.0,
                     oma_element_size_mm=0.025,
                     slit_size=30.0,
                     exposure_time_sec=1.0,
@@ -76,7 +76,7 @@ def get_default_profiles() -> Dict[str, SpectrometerConfig]:
         com_port="COM1",
         baudrate=9600,
         camera_model="PI MTE USB Camera",
-        num_pixels=1024,
+        num_pixels=512,
         gratings=[
             GratingConfig(
                 grating_grooves_per_mm=1800.0,
@@ -84,7 +84,7 @@ def get_default_profiles() -> Dict[str, SpectrometerConfig]:
                 laser_wavelength=514.532,
                 focal_length_mm=460.0,
                 inclusion_angle_rad=0.288,
-                central_pixel=512.0,
+                central_pixel=256.0,
                 oma_element_size_mm=-0.02765,
                 slit_size=30.0,
                 exposure_time_sec=1.0,
@@ -96,7 +96,7 @@ def get_default_profiles() -> Dict[str, SpectrometerConfig]:
                 laser_wavelength=514.532,
                 focal_length_mm=460.0,
                 inclusion_angle_rad=0.288,
-                central_pixel=512.0,
+                central_pixel=256.0,
                 oma_element_size_mm=-0.02765,
                 slit_size=10.0,
                 exposure_time_sec=1.0,

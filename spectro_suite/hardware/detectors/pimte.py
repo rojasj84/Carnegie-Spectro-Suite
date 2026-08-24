@@ -53,7 +53,7 @@ class PIMTECamera:
 
     is_mock = False
 
-    def __init__(self, num_pixels: int = 1024, dark_current: float = 12.0):
+    def __init__(self, num_pixels: int = 512, dark_current: float = 500.0):
         self.num_pixels = num_pixels
         self.dark_current = dark_current
         self.is_connected = False
@@ -209,37 +209,16 @@ class PIMTECamera:
             except Exception as ex:
                 logger.warning(f"PICam physical acquisition failed: {ex}")
 
-        # High-fidelity InGaAs physical NIR acquisition simulation
-        steps = max(1, int(exposure_time_sec / 0.05))
-        for step in range(steps):
-            if stop_requested and stop_requested():
-                break
-            time.sleep(min(0.05, exposure_time_sec / steps))
-            if progress_callback:
-                progress_callback(min(1.0, (step + 1) / steps))
-
-        if wavelengths_nm is None or len(wavelengths_nm) != self.num_pixels:
-            center_wl = 1064.0
-            wavelengths_nm = np.linspace(center_wl - 35.0, center_wl + 35.0, self.num_pixels)
-
-        # Baseline noise and true InGaAs response
-        bg = np.random.normal(self.dark_current, 2.5, self.num_pixels)
-        center_wl = float(np.mean(wavelengths_nm))
-        
-        # Authentic Raman / Photoluminescence spectral signature in NIR band
-        p1 = 4500.0 * np.exp(-((wavelengths_nm - (center_wl - 4.5)) ** 2) / (2 * 1.8 ** 2))
-        p2 = 1800.0 * np.exp(-((wavelengths_nm - (center_wl + 6.2)) ** 2) / (2 * 2.2 ** 2))
-        p3 = 850.0 * np.exp(-((wavelengths_nm - (center_wl - 14.0)) ** 2) / (2 * 3.0 ** 2))
-        
-        counts = bg + (p1 + p2 + p3) * float(exposure_time_sec)
-        return np.maximum(0, counts).astype(np.int64), 1
+        # When physical camera is not connected / not initialized:
+        # Return exact zeros (NO fake/simulated numbers)
+        return np.zeros(self.num_pixels, dtype=np.int64), 0
 
     def grab_2d_frame(self, color_mode: str = "RGB", timeout_ms: int = 2000) -> Optional[np.ndarray]:
         """Grab a 2D frame from the detector."""
         spec, _ = self.acquire_frame(exposure_time_sec=0.03)
         h = max(64, self.num_pixels // 4)
-        mx = float(np.max(spec)) if len(spec) > 0 else 1.0
-        norm = np.clip(spec / (mx if mx > 0 else 1.0) * 255.0, 0, 255).astype(np.uint8)
+        mx = float(np.max(spec)) if len(spec) > 0 and np.max(spec) > 0 else 1.0
+        norm = np.clip(spec / mx * 255.0, 0, 255).astype(np.uint8)
         mono_2d = np.tile(norm, (h, 1))
         if color_mode.upper() == "RGB":
             return np.stack([mono_2d] * 3, axis=-1)
@@ -247,7 +226,8 @@ class PIMTECamera:
 
     def get_temperature(self) -> Optional[dict]:
         """
-        Query InGaAs sensor cryogenic cooling temperature (-190°C / LN2 Cooled).
+        Query physical InGaAs sensor cryogenic cooling temperature.
+        Returns None / OFFLINE if no physical camera session is active.
         """
         if self._picam_dll and self._cam_handle:
             try:
@@ -267,7 +247,7 @@ class PIMTECamera:
                 if err_temp == 0:
                     return {
                         "temperature_c": float(temp_val.value),
-                        "setpoint_c": -190.0,
+                        "setpoint_c": float(temp_val.value),
                         "status": 2,
                         "status_str": "LOCKED",
                         "is_simulated": False,
@@ -275,22 +255,11 @@ class PIMTECamera:
             except Exception:
                 pass
 
-        # If Princeton Instruments hardware is attached to USB
-        is_hw = self._is_hardware_attached or self._check_hardware_attached()
-        if is_hw:
-            # Liquid nitrogen cooled detector operates at cryogenic baseline (~ -190 °C)
-            return {
-                "temperature_c": -190.0,
-                "setpoint_c": -190.0,
-                "status": 2,
-                "status_str": "LN2 COOLED",
-                "is_simulated": False,
-            }
-
+        # Disconnected / Uninitialized
         return {
-            "temperature_c": -190.0,
-            "setpoint_c": -190.0,
-            "status": 2,
-            "status_str": "LN2 COOLED",
+            "temperature_c": None,
+            "setpoint_c": None,
+            "status": 0,
+            "status_str": "OFFLINE",
             "is_simulated": False,
         }
