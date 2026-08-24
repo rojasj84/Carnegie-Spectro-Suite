@@ -46,11 +46,12 @@ IOCTL_EZUSB_BULK_READ_LEGACY = 0x00222048    # WDM / legacy bulk read
 IOCTL_EZUSB_BULK_WRITE = 0x0022042E          # Bulk write
 IOCTL_EZUSB_RESET_PIPE = 0x0022040C
 
-# Cypress FX2 CPU Control Registers
-CYPRESS_FX2_CPUCS = 0xE600                   # 8051 CPU Reset Register (1=Reset, 0=Run)
+# Cypress FX/FX2 CPU Control Registers
+CYPRESS_FX2_CPUCS = 0xE600                   # Cypress FX2 (CY7C68013A) 8051 CPU Reset Register
+CYPRESS_FX_CPUCS  = 0x7F92                   # Legacy Cypress FX (AN2131) CPU Reset Register
 
 # Hardware Vendor Request Commands (from PIXCM32.dll & USBDRVD.DLL)
-VR_ANCHOR_DOWNLOAD = 0xA0                    # SRAM Microcode Download
+VR_ANCHOR_DOWNLOAD = 0xA0                    # SRAM Microcode Download (Anchor Download)
 VR_EPLD_CONFIG     = 0x8D                    # EPLD / FPGA Register Bank Config
 VR_TRIGGER_ACQ     = 0x01                    # Trigger Hardware Acquisition
 VR_READ_STATUS     = 0x8A                    # Hardware Status & Temp Readback
@@ -284,12 +285,47 @@ class ST133Camera(BaseCamera):
         return None
 
     def _write_fx2_ram(self, addr: int, data: bytes) -> bool:
-        """Write raw firmware bytes into Cypress FX2 internal/external RAM."""
-        return self._vendor_request_out(VR_ANCHOR_DOWNLOAD, w_value=addr, w_index=0, data=data)
+        """
+        Write raw firmware bytes into Cypress FX/FX2 internal/external RAM.
+        Chunks transfers to 64 bytes (0x40) per EP0 control packet (matching USBDRVD.DLL FUN_10001d20).
+        """
+        if not data:
+            return True
+        chunk_size = 64
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset : offset + chunk_size]
+            success = self._vendor_request_out(
+                VR_ANCHOR_DOWNLOAD,
+                w_value=(addr + offset) & 0xFFFF,
+                w_index=0,
+                data=chunk
+            )
+            if not success:
+                return False
+            offset += chunk_size
+        return True
+
+    def _set_fx2_reset(self, in_reset: bool) -> bool:
+        """
+        Assert or release the 8051 CPU reset flag.
+        Tries Cypress FX2 register (0xE600) with fallback to legacy FX (0x7F92).
+        Matching USBDRVD.DLL FUN_10001c80 / FUN_10001cd0.
+        """
+        val_byte = bytes([1 if in_reset else 0])
+        # Try FX2 address 0xE600 first
+        res = self._vendor_request_out(VR_ANCHOR_DOWNLOAD, w_value=CYPRESS_FX2_CPUCS, data=val_byte)
+        if not res:
+            # Fallback to FX address 0x7F92
+            res = self._vendor_request_out(VR_ANCHOR_DOWNLOAD, w_value=CYPRESS_FX_CPUCS, data=val_byte)
+        return res
 
     def _bootstrap_firmware(self) -> bool:
         """
         Transfer official microcode (PI133B.DAT) into controller volatile SRAM.
+        Implements the two-pass upload architecture proven in USBDRVD_EZUSBDownloadRam:
+          - Pass 1: External RAM / Registers (addr >= 0x2000)
+          - Pass 2: Internal 8051 Code RAM (addr < 0x2000)
         """
         if self._is_firmware_loaded:
             return True
@@ -332,20 +368,25 @@ class ST133Camera(BaseCamera):
                 records.append((rec_len, addr, rec_bytes))
                 pos += 3 + rec_len
 
-            # 1. Assert CPU Reset (CPUCS 0xE600 = 1)
-            self._write_fx2_ram(CYPRESS_FX2_CPUCS, bytes([1]))
+            # 1. Assert CPU Reset (CPUCS = 1)
+            self._set_fx2_reset(True)
 
-            # 2. Upload records to volatile SRAM
+            # 2. Pass 1: External RAM records (addr >= 0x2000)
             for length, addr, rec_bytes in records:
-                if length > 0:
+                if length > 0 and addr >= 0x2000:
                     self._write_fx2_ram(addr, rec_bytes)
 
-            # 3. Release CPU Reset (CPUCS 0xE600 = 0)
-            self._write_fx2_ram(CYPRESS_FX2_CPUCS, bytes([0]))
+            # 3. Pass 2: Internal 8051 Code RAM records (addr < 0x2000)
+            for length, addr, rec_bytes in records:
+                if length > 0 and addr < 0x2000:
+                    self._write_fx2_ram(addr, rec_bytes)
+
+            # 4. Release CPU Reset (CPUCS = 0) to start 8051 firmware execution
+            self._set_fx2_reset(False)
             time.sleep(0.1)
 
             self._is_firmware_loaded = True
-            logger.info(f"Loaded {len(records)} microcode records ({len(fw_data)} bytes) into volatile SRAM.")
+            logger.info(f"Loaded {len(records)} microcode records ({len(fw_data)} bytes) into volatile SRAM (2-pass).")
             return True
         except Exception as ex:
             logger.warning(f"Firmware SRAM bootstrap notice: {ex}")
