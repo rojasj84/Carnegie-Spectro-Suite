@@ -26,8 +26,9 @@ from ..base import Camera as BaseCamera
 
 logger = logging.getLogger(__name__)
 
-# Safe Win32 kernel32 handle (platform-guarded)
+# Safe Win32 kernel32 and winusb handles (platform-guarded)
 kernel32 = getattr(ctypes, "windll", None).kernel32 if hasattr(ctypes, "windll") else None
+winusb = getattr(ctypes, "windll", None).winusb if hasattr(ctypes, "windll") else None
 
 # Win32 File Constants
 GENERIC_READ = 0x80000000
@@ -56,6 +57,18 @@ VR_EPLD_CONFIG     = 0x8D                    # EPLD / FPGA Register Bank Config
 VR_TRIGGER_ACQ     = 0x01                    # Trigger Hardware Acquisition
 VR_READ_STATUS     = 0x8A                    # Hardware Status & Temp Readback
 VR_READ_TEMP       = 0x8B                    # Read RTD Temperature Sensor
+
+
+class WINUSB_SETUP_PACKET(ctypes.Structure):
+    """Standard WinUSB Setup Packet structure."""
+    _pack_ = 1
+    _fields_ = [
+        ("RequestType", ctypes.c_ubyte),  # 0x40 = Vendor OUT, 0xC0 = Vendor IN
+        ("Request", ctypes.c_ubyte),
+        ("Value", ctypes.c_ushort),
+        ("Index", ctypes.c_ushort),
+        ("Length", ctypes.c_ushort)
+    ]
 
 
 class OVERLAPPED(ctypes.Structure):
@@ -100,6 +113,7 @@ class ST133Camera(BaseCamera):
         self.camera_model_name = "Princeton Instruments OMA-V InGaAs (7514-0001)"
         
         self._device_handle = None
+        self._winusb_handle = None
         self._device_path = None
         self._is_firmware_loaded = False
         self._last_temperature: Optional[float] = None
@@ -110,7 +124,13 @@ class ST133Camera(BaseCamera):
         if not kernel32:
             return None
 
-        guid_str = "{3972c010-8ea9-4939-926e-8a9db35ba0a6}"
+        # Known GUIDs for Princeton Instruments KMDF and WinUSB
+        target_guids = [
+            "{a5dcbf10-6530-11d2-901f-00c04fb951ed}", # USB Raw Device GUID (WinUSB)
+            "{3972c010-8ea9-4939-926e-8a9db35ba0a6}", # Princeton Instruments KMDF GUID
+            "{88bae032-5a81-49f0-bc3d-a4ff138216d6}", # USBDevice class GUID
+            "{dee824ef-729b-4a0e-9c14-b7117d33a817}", # Custom WinUSB Interface GUID
+        ]
         
         # 1. Enumerate active PnP USB instances from Windows Registry
         try:
@@ -122,33 +142,36 @@ class ST133Camera(BaseCamera):
                     try:
                         inst = winreg.EnumKey(k, i)
                         i += 1
-                        path = f"\\\\?\\USB#VID_0BD7&PID_A010#{inst}#{guid_str}"
-                        h = kernel32.CreateFileW(
-                            path,
-                            GENERIC_READ | GENERIC_WRITE,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE,
-                            None,
-                            OPEN_EXISTING,
-                            0,
-                            None
-                        )
-                        if h != INVALID_HANDLE_VALUE and h != 0xFFFFFFFFFFFFFFFF:
-                            kernel32.CloseHandle(h)
-                            logger.info(f"Found active ST-133 USB path on instance: {inst}")
-                            return path
+                        for g in target_guids:
+                            path = f"\\\\?\\USB#VID_0BD7&PID_A010#{inst}#{g}"
+                            h = kernel32.CreateFileW(
+                                path,
+                                GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                None,
+                                OPEN_EXISTING,
+                                0,
+                                None
+                            )
+                            if h != INVALID_HANDLE_VALUE and h != 0xFFFFFFFFFFFFFFFF:
+                                kernel32.CloseHandle(h)
+                                logger.info(f"Found active ST-133 USB path on instance: {inst} (GUID: {g})")
+                                return path
                     except OSError:
                         break
         except Exception:
             pass
 
         # 2. Fallback to known standard device symlinks
-        for p in [
-            f"\\\\?\\USB#VID_0BD7&PID_A010#5&1487294b&0&6#{guid_str}",
-            f"\\\\?\\USB#VID_0BD7&PID_A010#5&1487294b&0&5#{guid_str}",
-            r"\\.\PIUSB0",
-            r"\\.\PIUSB",
-            r"\\.\EZUSB0"
-        ]:
+        for g in target_guids:
+            for inst_pattern in ["5&1487294b&0&5", "5&1487294b&0&6"]:
+                p = f"\\\\?\\USB#VID_0BD7&PID_A010#{inst_pattern}#{g}"
+                h = kernel32.CreateFileW(p, GENERIC_READ | GENERIC_WRITE, 3, None, OPEN_EXISTING, 0, None)
+                if h != INVALID_HANDLE_VALUE and h != 0xFFFFFFFFFFFFFFFF:
+                    kernel32.CloseHandle(h)
+                    return p
+
+        for p in [r"\\.\PIUSB0", r"\\.\PIUSB", r"\\.\EZUSB0"]:
             h = kernel32.CreateFileW(p, GENERIC_READ | GENERIC_WRITE, 3, None, OPEN_EXISTING, 0, None)
             if h != INVALID_HANDLE_VALUE and h != 0xFFFFFFFFFFFFFFFF:
                 kernel32.CloseHandle(h)
@@ -157,7 +180,7 @@ class ST133Camera(BaseCamera):
         return None
 
     def connect(self) -> bool:
-        """Open 64-bit kernel communication channel to the ST-133 controller."""
+        """Open 64-bit communication channel to the ST-133 controller via WinUSB / KMDF."""
         if not kernel32:
             logger.warning("ST-133 native USB driver requires a 64-bit Windows host.")
             self.is_connected = False
@@ -187,15 +210,83 @@ class ST133Camera(BaseCamera):
                 return False
 
             self._device_handle = h
+
+            # Initialize WinUSB if supported
+            if winusb:
+                h_wusb = ctypes.c_void_p(0)
+                if winusb.WinUsb_Initialize(h, ctypes.byref(h_wusb)):
+                    self._winusb_handle = h_wusb
+                    # Set 500ms pipe timeout policy on EP0 and bulk endpoints
+                    PIPE_TRANSFER_TIMEOUT = 0x03
+                    timeout_ms = wintypes.ULONG(500)
+                    for p_id in [0x00, 0x08, 0x82, 0x86]:
+                        winusb.WinUsb_SetPipePolicy(
+                            self._winusb_handle,
+                            p_id,
+                            PIPE_TRANSFER_TIMEOUT,
+                            ctypes.sizeof(timeout_ms),
+                            ctypes.byref(timeout_ms)
+                        )
+                    logger.info("WinUSB initialized successfully for ST-133.")
+
             self.is_connected = True
             logger.info(f"Connected to ST-133 Controller (Handle: {h})")
 
             # Bootstrap official 8051 microcode & timing table into volatile SRAM
             self._bootstrap_firmware()
+
+            # Execute Step 7: Controller Handshake & EPLD Decoder Arming (PIPP_Initialize)
+            self._init_controller_handshake()
             return True
         except Exception as ex:
             logger.error(f"Error connecting to ST-133 controller: {ex}")
             self.is_connected = False
+            return False
+
+    def _init_controller_handshake(self) -> bool:
+        """
+        Execute the 4-parameter PIPP_Initialize handshake reverse-engineered from
+        PIXCM32.dll (FUN_1001089c / FUN_1000f0f4) and Pipp32.dll:
+          1. Reset / Flush USB Endpoints (0x08, 0x82, 0x86).
+          2. Set Controller Mode (0x22 = 1: High-Speed 16-Bit Digitizer DMA).
+          3. Set Packet Size (0x23 = 512 bytes).
+          4. Set Sub-address (0x24 = 0).
+          5. Arm EPLD Command Decoder (0x26 = 1).
+          6. Query Hardware Revision (VR 0xF0, 0xF1, 0xA8).
+        """
+        if not self._device_handle or not kernel32:
+            return False
+
+        try:
+            # 1. Reset / Flush active endpoints
+            if self._winusb_handle and winusb:
+                for p_id in [0x00, 0x08, 0x82, 0x86]:
+                    try:
+                        winusb.WinUsb_ResetPipe(self._winusb_handle, p_id)
+                    except Exception:
+                        pass
+
+            # 2. Configure High-Speed 16-Bit Digitizer Mode (0x22 = 1)
+            self._vendor_request_out(0xAF, w_value=0x22, data=bytes([1, 0]))
+            self._vendor_request_out(0xF2, w_value=0x22, data=bytes([1, 0]))
+
+            # 3. Configure USB Endpoint Packet Size (0x23 = 512)
+            self._vendor_request_out(0xAF, w_value=0x23, data=bytes([0x00, 0x02]))
+
+            # 4. Set Controller Sub-address (0x24 = 0)
+            self._vendor_request_out(0xAF, w_value=0x24, data=bytes([0, 0]))
+
+            # 5. Arm EPLD Command Decoder (0x26 = 1)
+            self._vendor_request_out(0xAF, w_value=0x26, data=bytes([1, 0]))
+
+            # 6. Query Hardware Status / Presence (VR 0xF0, 0xF1)
+            self._vendor_request_in(0xF0, length=1)
+            self._vendor_request_in(0xF1, length=2)
+
+            logger.info("ST-133 controller handshake & EPLD decoder armed successfully.")
+            return True
+        except Exception as ex:
+            logger.warning(f"Controller handshake notice: {ex}")
             return False
 
     def _vendor_request_out(
@@ -206,11 +297,36 @@ class ST133Camera(BaseCamera):
         data: Optional[bytes] = None
     ) -> bool:
         """
-        Send a vendor control OUT transfer using the reverse-engineered 10-byte setup packet.
+        Send a vendor control OUT transfer. Uses WinUsb_ControlTransfer if WinUSB is active,
+        or DeviceIoControl with the 10-byte setup packet if KMDF is active.
         """
         if not self._device_handle or not kernel32:
             return False
 
+        data_len = len(data) if data else 0
+        c_buf = (ctypes.c_ubyte * data_len)(*data) if data else None
+
+        # 1. WinUSB Path
+        if self._winusb_handle and winusb:
+            pkt_w = WINUSB_SETUP_PACKET()
+            pkt_w.RequestType = 0x40 # Host-to-Device | Vendor | Device
+            pkt_w.Request = b_request
+            pkt_w.Value = w_value & 0xFFFF
+            pkt_w.Index = w_index & 0xFFFF
+            pkt_w.Length = data_len
+            trans = wintypes.ULONG(0)
+            res = winusb.WinUsb_ControlTransfer(
+                self._winusb_handle,
+                pkt_w,
+                c_buf,
+                data_len,
+                ctypes.byref(trans),
+                None
+            )
+            if res:
+                return True
+
+        # 2. KMDF DeviceIoControl Path
         pkt = USB_SETUP_PACKET()
         pkt.direction = 0     # OUT
         pkt.bRequestType = 2 # Vendor
@@ -221,11 +337,7 @@ class ST133Camera(BaseCamera):
         pkt.wValue = w_value & 0xFFFF
         pkt.wIndex = w_index & 0xFFFF
 
-        data_len = len(data) if data else 0
-        c_buf = (ctypes.c_ubyte * data_len)(*data) if data else None
         bytes_ret = wintypes.DWORD(0)
-
-        # Attempt primary KMDF IOCTL, fallback to legacy WDM if necessary
         for ioctl in [IOCTL_EZUSB_VENDOR_REQUEST, IOCTL_EZUSB_VENDOR_REQUEST_LEGACY]:
             res = kernel32.DeviceIoControl(
                 self._device_handle,
@@ -250,11 +362,33 @@ class ST133Camera(BaseCamera):
         length: int = 64
     ) -> Optional[bytes]:
         """
-        Execute a vendor control IN transfer to read register bytes from the controller.
+        Execute a vendor control IN transfer to read bytes from controller.
         """
         if not self._device_handle or not kernel32:
             return None
 
+        # 1. WinUSB Path
+        if self._winusb_handle and winusb:
+            pkt_w = WINUSB_SETUP_PACKET()
+            pkt_w.RequestType = 0xC0 # Device-to-Host | Vendor | Device
+            pkt_w.Request = b_request
+            pkt_w.Value = w_value & 0xFFFF
+            pkt_w.Index = w_index & 0xFFFF
+            pkt_w.Length = length
+            read_buf = ctypes.create_string_buffer(length)
+            trans = wintypes.ULONG(0)
+            res = winusb.WinUsb_ControlTransfer(
+                self._winusb_handle,
+                pkt_w,
+                read_buf,
+                length,
+                ctypes.byref(trans),
+                None
+            )
+            if res and trans.value > 0:
+                return bytes(read_buf.raw[:trans.value])
+
+        # 2. KMDF DeviceIoControl Path
         pkt = USB_SETUP_PACKET()
         pkt.direction = 1     # IN
         pkt.bRequestType = 2 # Vendor
@@ -455,7 +589,14 @@ class ST133Camera(BaseCamera):
         return self._vendor_request_out(VR_TRIGGER_ACQ, w_value=min(65535, exp_ms), w_index=0)
 
     def disconnect(self):
-        """Close kernel communication handle cleanly."""
+        """Close communication handles cleanly."""
+        if self._winusb_handle and winusb:
+            try:
+                winusb.WinUsb_Free(self._winusb_handle)
+            except Exception:
+                pass
+            self._winusb_handle = None
+
         if self._device_handle and self._device_handle != INVALID_HANDLE_VALUE and kernel32:
             try:
                 kernel32.CloseHandle(self._device_handle)
@@ -491,12 +632,27 @@ class ST133Camera(BaseCamera):
             if progress_callback:
                 progress_callback(min(1.0, (step + 1) / steps))
 
-        # 3. Read 512 uint16 Pixels (1024 bytes) from Bulk IN Pipe
+        # 3. Read 512 uint16 Pixels (1024 bytes) from Bulk IN Pipe (0x82)
         expected_bytes = self.num_pixels * 2
         read_buf = ctypes.create_string_buffer(expected_bytes)
         bytes_read = wintypes.DWORD(0)
 
-        # Try direct IOCTL_EZUSB_BULK_READ first (KMDF standard)
+        # A. WinUSB Direct Pipe Read (0x82)
+        if self._winusb_handle and winusb:
+            trans = wintypes.ULONG(0)
+            res_wu = winusb.WinUsb_ReadPipe(
+                self._winusb_handle,
+                0x82, # Endpoint 2 Bulk IN
+                read_buf,
+                expected_bytes,
+                ctypes.byref(trans),
+                None
+            )
+            if res_wu and trans.value >= expected_bytes:
+                raw_data = np.frombuffer(read_buf.raw[:expected_bytes], dtype=np.uint16)
+                return raw_data.astype(np.int64), 1
+
+        # B. KMDF IOCTL_EZUSB_BULK_READ fallback
         res_ioctl = kernel32.DeviceIoControl(
             self._device_handle,
             IOCTL_EZUSB_BULK_READ,
