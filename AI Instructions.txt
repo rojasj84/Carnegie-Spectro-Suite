@@ -4,6 +4,7 @@
 Document: AI Instructions.txt
 Target Audience: AI Coding Agents & Systems Engineers
 Project: Carnegie Spectro Suite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Repository: git@github.com:rojasj84/Carnegie-Spectro-Suite.git (Branch: carnegie-spectro-suite)
 Date: August 2026
 
 --------------------------------------------------------------------------------
@@ -20,43 +21,57 @@ Date: August 2026
      * Status: 100% OPERATIONAL & VERIFIED.
    - Grating Turrets: Grating 1 (1800 g/mm, blazed for Raman), Grating 2 (300 g/mm)
 
-2. Optical Detector:
-   - Model: Princeton Instruments OMA-V Linear InGaAs Photodiode Array (Model 7514-0001)
-   - Controller: Princeton Instruments ST-133 Controller (2 MHz / USB Interface)
-   - Sensor Geometry: 512 active InGaAs channels (1D array, 25/50 um pitch, 16-bit ADC)
-   - Cryogenic Cooling: Liquid Nitrogen (LN2) Dewar operating at -97.5 °C.
-   - USB Hardware Interface: Cypress EZ-USB FX2 (CY7C68013A)
-   - USB PnP Identifiers:
-     * VID: 0x0BD7 (Princeton Instruments / Roper Scientific)
-     * PID: 0xA010 (ST-133 / OMA-V Controller)
-     * Device Interface GUID: {3972C010-8EA9-4939-926E-8A9DB35BA0A6}
-     * Windows 64-Bit Driver: piusbwdf.sys (KMDF / Kernel-Mode Driver Framework)
+2. Optical Detectors:
+   - PRIMARY DETECTOR: Princeton Instruments OMA-V Linear InGaAs Photodiode Array (Model 7514-0001)
+     * Controller: Princeton Instruments ST-133 Controller (2 MHz / USB Interface)
+     * Driver: spectro_suite/hardware/detectors/st133_usb.py (Native 64-bit KMDF USB)
+     * Sensor Geometry: 512 active InGaAs channels (1D array, 25/50 um pitch, 16-bit ADC)
+     * Cryogenic Cooling: Liquid Nitrogen (LN2) Dewar operating at -97.5 °C.
+     * USB Hardware Interface: Cypress EZ-USB FX2 (CY7C68013A)
+     * USB PnP Identifiers:
+       - VID: 0x0BD7 (Princeton Instruments / Roper Scientific)
+       - PID: 0xA010 (ST-133 / OMA-V Controller)
+       - Device Interface GUID: {3972C010-8EA9-4939-926E-8A9DB35BA0A6}
+       - Windows 64-Bit Driver: piusbwdf.sys (KMDF / Kernel-Mode Driver Framework)
+   - SECONDARY / IMAGING: FLIR Blackfly S (BFS-U3-16S2M-CS / Spinnaker SDK)
+     * Driver: spectro_suite/hardware/detectors/blackfly.py
+   - ROADMAP / PLANNED: Princeton Instruments PIXIS Series CCD Cameras (100/256/400/1024/2048)
+     * Documented in: Future Add Ons.txt (Section 5)
 
 --------------------------------------------------------------------------------
  2. SUMMARY OF COMPLETED WORK & CURRENT PROJECT STATE
 --------------------------------------------------------------------------------
-1. Clean Modern Repository Structure:
+1. Clean Modern Repository Structure & GitHub Setup:
    - Active Production Codebase: spectro_suite/
    - Entry Point: main.py (launches SpectroSuite GUI immediately)
-   - Extracted Vendor Binaries: disassembly_dlls/ (PIXCM32.dll, pidc32.dll, USBDRVD.DLL, etc.)
-   - Full Ghidra Decompiled C Sources: ghidra_scripts/ (decompiled_PIXCM32.c, decompiled_pidc32.c, decompiled_USBDRVD.c)
-   - Archived Test & Diagnostic Scripts: Legacy Development and Testing/
-   - Historical VB6 Codebase (Reference only): HR460-PICCD/
+   - GitHub Repository: https://github.com/rojasj84/Carnegie-Spectro-Suite
+   - Active Git Branch: carnegie-spectro-suite (SSH authenticated with ed25519 key)
+   - Firmware Binaries: firmware/ (PI133B.DAT, PI133B2.DAT, PI133B5.DAT, PIXISB.DAT)
+   - Disassembly & Decompilation: disassembly_dlls/ & ghidra_scripts/
+   - Roadmap & Backlog: Future Add Ons.txt
 
-2. Spectrometer Subsystems (100% Operational):
+2. Cross-Platform Anti-Aliased Typography System:
+   - Module: spectro_suite/gui/fonts.py
+   - Dynamic OS font selection: DejaVu Sans, Liberation Sans, Noto Sans, or Ubuntu on Linux; Segoe UI on Windows.
+   - `setup_app_fonts(root)`: Auto-configures standard Tk named fonts (TkDefaultFont, TkHeadingFont, etc.).
+   - Replaced all legacy hardcoded `("Tahoma", 8)` and `("Segoe UI", 9)` tuples across vb_app.py, camera_view.py, and device_selector.py.
+   - Base label size upgraded to 9pt to eliminate pixel crunching and jagged rendering on Linux.
+   - Test Suite: spectro_suite/tests/test_fonts.py (All 56 unit tests passing).
+
+3. Spectrometer Subsystems (100% Operational):
    - Acton SP-2150 on COM3 and Horiba HR460 on COM1 both confirmed working.
    - Motor control, grating switching, calibrated wavelength positioning, and auto-centering.
 
-3. Strict Instrument Reporting & Data Integrity:
+4. Strict Instrument Reporting & Data Integrity:
    - All synthetic peaks, mock baseline noise, and hardcoded temperatures have been ELIMINATED.
    - Temperature returns None and displays "Detector Temp: OFFLINE" unless physical sensor bytes are read.
    - Acquisition returns exact zeros (0 counts) when the detector is in standby.
    - 512-channel InGaAs geometry is strictly maintained across all plot auto-scaling.
 
-4. 64-Bit Native USB Driver (spectro_suite/hardware/detectors/st133_usb.py):
+5. 64-Bit Native USB Driver (spectro_suite/hardware/detectors/st133_usb.py):
    - Opens direct 64-bit kernel handles (kernel32.CreateFileW with FILE_FLAG_OVERLAPPED).
    - Dynamically discovers active USB instance paths across any USB port.
-   - Implements automated volatile SRAM firmware bootstrapping on connection.
+   - Implements automated volatile SRAM firmware bootstrapping on connection (PI133B.DAT).
    - Fully integrates Ghidra reverse-engineered 10-byte setup packets and EPLD timing microcode.
    - Fully cross-platform guarded (100% unit tested on Linux and Windows).
 
@@ -143,15 +158,18 @@ The reverse-engineered architecture is implemented in spectro_suite/hardware/det
 2. Test ST-133 Native Driver Standalone:
    python -m unittest spectro_suite/tests/test_st133.py
 
-3. Test Primary Spectrometer (Acton SP-2150 on COM3):
+3. Test Font Utilities & Typography:
+   python -m unittest spectro_suite/tests/test_fonts.py
+
+4. Test Primary Spectrometer (Acton SP-2150 on COM3):
    python -c "from spectro_suite.hardware.spectrometers.acton import ActonSP2150; m = ActonSP2150('COM3'); print('Acton Connected:', m.connect())"
 
-4. Test Secondary Spectrometer (Horiba HR460 on COM1):
+5. Test Secondary Spectrometer (Horiba HR460 on COM1):
    python -c "from spectro_suite.hardware.spectrometers.horiba import HoribaHR460; m = HoribaHR460('COM1'); print('Horiba Connected:', m.connect())"
 
-5. Test Live ST-133 InGaAs Readout on Windows Lab PC:
+6. Test Live ST-133 InGaAs Readout on Windows Lab PC:
    python -c "from spectro_suite.hardware.detectors.st133_usb import ST133Camera; cam = ST133Camera(); print('Connected:', cam.connect()); spec, count = cam.acquire_frame(0.1); print('Shape:', spec.shape, 'Valid Frame:', count, 'Max Count:', spec.max())"
 
-6. Launch Full SpectroSuite GUI:
+7. Launch Full SpectroSuite GUI:
    python main.py
 ================================================================================
