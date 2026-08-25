@@ -1,0 +1,286 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 3)
+================================================================================
+Document: AI Instructions 3.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+--------------------------------------------------------------------------------
+ 0. READ THIS FIRST: CORRECTIONS TO "AI Instructions 2.txt"
+--------------------------------------------------------------------------------
+Part 2 of this document series claims several things were "confirmed on physical
+hardware" that a full live-hardware session today (with real Win32 error codes
+captured for every call, not just return-code checks) found to be false, or at
+least never actually demonstrated:
+
+  - "Physical 8051 SRAM Firmware Upload ... Controller immediately boots its
+    8051 microcode." -- PI133B.DAT is NOT 8051 microcode. Decompiling
+    PI13332.dll's PICM_Define_Intrapixel_Pattern shows it's parsed as a stream
+    of 16-bit ints for an intrapixel timing/lookup table. Uploading it via
+    CPU-reset + SRAM write overwrites whatever firmware is actually resident.
+    This firmware bootstrap path is now intentionally DISABLED in
+    st133_usb.py's connect() (see the NOTE comment there).
+
+  - "ST-133 Mainboard Chassis Sensor: Reads 30.2C ... Hardware Acquisition
+    Trigger: VR 0x01 is accepted (ok=True, err=0)." -- VR 0x8B (temperature)
+    was tested live today with proper overlapped I/O and hangs indefinitely
+    with zero response from the controller. No temperature has ever actually
+    been read from this hardware. VR 0x01 was never tested live this session;
+    treat any claim of it succeeding as unverified.
+
+  - "Passive LN2 Cryogenic Mode Configuration ... successfully disables
+    Peltier PID loop." -- no corroborating evidence found; likely fabricated
+    or confused with a different (simulated/mock) code path.
+
+  - IOCTL_EZUSB_VENDOR_REQUEST (0x00220425) and friends, from both Part 1 and
+    Part 2 -- empirically WRONG. DeviceIoControl with these codes against the
+    real installed driver returns ERROR_INVALID_FUNCTION (err=1) immediately.
+    See Section 4 below for the real codes, decoded directly from the driver
+    binary's own IOCTL dispatch.
+
+Lesson for future sessions: verify hardware claims against real Win32
+GetLastError() codes and, where possible, the driver/DLL binary itself --
+"ok=True" from a return-code check alone is not sufficient evidence, since
+several of the paths above return misleadingly truthy results or were
+apparently never exercised against the real device at all.
+
+--------------------------------------------------------------------------------
+ 1. HARDWARE SYSTEM & SUBSYSTEM STATUS (unchanged from Parts 1-2)
+--------------------------------------------------------------------------------
+1. Spectrometers (still believed operational, not touched this session):
+   - Primary: Acton SP-2150 on COM3 (RS-232, 9600 Baud, 8N1).
+   - Secondary: Horiba Jobin Yvon HR460 on COM1 (RS-232, 9600 Baud, 8N1).
+
+2. InGaAs Detector & Controller:
+   - Detector Head: Princeton Instruments OMA-V Linear InGaAs Photodiode Array
+     (Model 7514-0001), 512 active linear channels, 16-bit ADC.
+   - Controller: Princeton Instruments ST-133, USB 2.0, Cypress EZ-USB FX2.
+   - USB IDs: VID_0BD7, PID_A010 -- CONFIRMED correct for this specific unit
+     (Device Manager: "Roper Scientific USB2 Interface V1.0" / "PI MTE USB
+     Camera" at USB\VID_0BD7&PID_A010\...). Do not "fix" this to PID_A026 --
+     that was tried this session based on a driver code path that turned out
+     to apply to a different hardware revision; it broke device discovery
+     against this actual unit and was reverted.
+   - The real kernel driver (see Section 2) explicitly supports BOTH PID_A010
+     and PID_A026 as two legitimate hardware revisions (IOCTL 0x5500600E reads
+     back which one is attached) -- this is not a version mismatch to resolve.
+
+--------------------------------------------------------------------------------
+ 2. THE REAL DRIVER: piusbwdf.sys (decompiled directly, not inferred)
+--------------------------------------------------------------------------------
+This machine has TWO valid drivers available for this device, and this session
+switched between them for diagnostic purposes:
+
+  A. Generic Microsoft WinUSB (winusb.sys) -- what Parts 1-2 assumed was
+     primary. Bound via Drivers/ST133_WinUSB.inf + Drivers/zadig.exe (already
+     in this repo). Talks via WinUsb_ControlTransfer / WinUsb_ReadPipe /
+     WinUsb_WritePipe. st133_usb.py's WinUSB code paths target this.
+
+  B. The actual Princeton Instruments driver, piusbwdf.sys (Provider:
+     Princeton Instruments, package piusb3.inf, already staged in this
+     machine's driver store as oem145.inf). This is the one currently bound
+     (Device Manager shows "PI MTE USB Camera", Service: PIUSB64/piusbwdf,
+     Status OK). It was decompiled directly this session:
+     ghidra_scripts/decompiled_piusbwdf.c (84 functions, small/fast to search).
+
+  To switch between them: WinUSB via zadig.exe + ST133_WinUSB.inf (both in
+  Drivers/); the real driver via an elevated command prompt:
+    pnputil /add-driver "C:\Windows\System32\DriverStore\FileRepository\piusb3.inf_amd64_ced26d1521bd2318\piusb3.inf" /install
+  (This only rebinds cleanly if the device currently has NO driver bound --
+  e.g. right after a CM_PROB_FAILED_INSTALL state. If WinUSB is actively
+  bound and working, use Device Manager's "Update driver > Browse my
+  computer > Let me pick from a list" instead.)
+
+  piusbwdf.sys contains a real function named CheckFirmwareAndUpgrade that:
+    - Reads the controller's firmware version (a genuine vendor request,
+      internally bRequest 0xF1 based on other evidence -- this session read
+      firmware version 1.0 back from this unit, live).
+    - If version < 3.6, runs a real Cypress FX2 anchor-download sequence:
+      assert CPU reset (register 0xE600, request 0xA0 -- same constants
+      already in st133_usb.py), write a ~3.6KB loader blob + a ~0.5KB block +
+      a final ~6.9KB firmware image into RAM in 64-byte chunks (both blobs
+      are embedded directly in piusbwdf.sys), release reset between/after.
+    - This unit's firmware version (1.0) should have triggered this. Whether
+      it actually completed successfully is UNCONFIRMED -- this is the
+      single most valuable unresolved question. See Section 6.
+
+--------------------------------------------------------------------------------
+ 3. WHAT'S ACTUALLY CONFIRMED WORKING (live hardware, this session)
+--------------------------------------------------------------------------------
+1. Opening the device: WinUSB path and piusbwdf.sys path BOTH succeed
+   (connect() returns True, real handle obtained) regardless of which driver
+   is bound.
+
+2. Two specific vendor requests return REAL data through piusbwdf.sys:
+   - VR 0xF0 (IOCTL_VENDOR_REQUEST_IN, 8-byte read): returned
+     03 00 00 00 00 00 00 00
+   - VR 0xF1 (same, 2-byte read): returned 00 01 00 00 00 00 00 00
+     -> decodes as firmware version 1.0 (see Section 2).
+
+3. IOCTL_READ_FRAME (0x55002021) is accepted as a real, correctly-shaped
+   asynchronous request (STATUS_PENDING / ERROR_IO_PENDING) and can be
+   cleanly cancelled with CancelIoEx after a bounded wait. No frame data
+   observed yet, but the plumbing is right.
+
+4. st133_usb.py has been rewritten around all of the above (see Section 4)
+   and its full unit test suite (6 tests) passes, including live against the
+   actual connected hardware -- self-recovering, no hangs, no manual process
+   kills or physical unplugs needed during the test run itself.
+
+--------------------------------------------------------------------------------
+ 4. REAL IOCTL / PROTOCOL SPECIFICATION (decoded from piusbwdf.sys directly)
+--------------------------------------------------------------------------------
+These REPLACE the IOCTL_EZUSB_* constants and 10-byte USB_SETUP_PACKET-based
+KMDF path from Parts 1-2, which are confirmed wrong against the real driver.
+
+  IOCTL_VENDOR_REQUEST_OUT = 0x55002005   (METHOD_IN_DIRECT)
+  IOCTL_VENDOR_REQUEST_IN  = 0x5500200A   (METHOD_OUT_DIRECT)
+  IOCTL_CANCEL_FRAME_READ  = 0x5500201C
+  IOCTL_READ_FRAME         = 0x55002021   (async/pended -- see Section 5)
+  IOCTL_GET_DRIVER_INFO    = 0x55006002
+  IOCTL_GET_USB_PID        = 0x5500600E   (reports PID_A010 vs PID_A026)
+
+  Vendor request buffer format (both directions): the IOCTL *input* buffer is
+  always an 8-byte header:
+    [bRequest, 0, 0, 0, wValueLo, wValueHi, 0, 0]
+  For IOCTL_VENDOR_REQUEST_OUT (METHOD_IN_DIRECT), the payload bytes actually
+  being WRITTEN to the device go in the IOCTL *output* buffer slot -- NOT
+  appended to the input buffer. Getting this wrong fails immediately with
+  ERROR_INSUFFICIENT_BUFFER (confirmed live; this is how the correct shape
+  was found).
+
+  Register writes: bRequest=0xAF (fixed), wValue=register address, 2-byte
+  value as the "output slot" payload. This shape is accepted by the IOCTL
+  layer; the controller has never been observed to ACK one (see Section 6).
+
+  Frame read: IOCTL_READ_FRAME must be issued as OVERLAPPED I/O (device
+  handle opened with FILE_FLAG_OVERLAPPED, already how st133_usb.py opens
+  it). It does not complete inline. See Section 6 for the critical safety
+  note about this.
+
+--------------------------------------------------------------------------------
+ 5. EXPOSURE TIME / GAIN: HOW IT REALLY WORKS (traced from WinSpec32.exe down)
+--------------------------------------------------------------------------------
+Tracing from the actual application (WinSpec32.exe) rather than guessing at
+DLL internals: WinSpec32.exe does NOT statically import PIXCM32.dll or
+contrman.dll at all. Its only direct acquisition-adjacent import is from
+Pipp32.dll: PIPP_Reset_Interface, PIPP_Initialize, PIPP_Destroy,
+PIPP_Set_UseWinDefaults, PIPP_SetLongParam, PIPP_GetLongParam -- interface-
+level plumbing only. The camera-specific API (PICM_Set_exposuretime,
+PICM_SetChannelGain, PICM_Create_controller, etc.) lives in PIXCM32.dll,
+loaded dynamically (LoadLibrary) at runtime, not statically linked.
+
+PICM_Set_exposuretime's real implementation (FUN_10056117, the ST-133
+class's actual vtable slot -- ST-133 is the *default* case in
+PICM_Create_controller's type dispatch, not an explicit numbered case) does
+NOT touch the hardware. It converts the value to a canonical unit and stores
+it as object state (offsets +0x690, +0x694, and a cached double at
++0x67c+0x38). Exposure time only reaches hardware later, compiled into a
+timing program.
+
+That timing program is built as an in-memory DOUBLY-LINKED LIST of
+{count: u32, opcode: u8, flag: u8} instruction nodes (FUN_1002c88f /
+FUN_1002cf00, PIXCM32.dll) -- NOT a flat byte array being assembled for
+upload, which is what st133_usb.py's _build_ingaas_timing_stream() assumes.
+Confirmed real opcodes from FUN_1002c88f: 0xE0, 0x20, 0x30, 0x44, 0x46, 0xBD,
+and the literal value 1. 0x40 (which Parts 1-2 claimed was "integration gate
+duration") NEVER appears in this function; _build_ingaas_timing_stream has
+been corrected to use 0x30 instead, but the overall byte layout is still a
+best-effort guess, not the real wire format.
+
+The linked list gets compiled into an actual byte buffer and transmitted by
+FUN_10029160 (PIXCM32.dll) -- a very large (100+ local variables), generic,
+multi-camera-mode routine shared across many PI camera types. Its exact
+serialization was NOT fully traced this session (genuinely large scope).
+What IS confirmed: the compiled buffer gets sent via calls that resolve to
+Pipp32.dll's PIPP_Output_Multiple-style bulk write, preceded by a register-
+select write (0x7e00 for a small header buffer, then the mode/sub-address
+byte for the main buffer) -- i.e. the real wire mechanism is a bulk write of
+a *compiled* buffer, not literal opcode bytes concatenated by hand.
+_build_ingaas_timing_stream's output is not currently sent anywhere on the
+IOCTL_READ_FRAME path; _arm_gate_and_trigger's VR 0x8D/0x01 calls that do
+send it were never validated live and are flagged as speculative in code.
+
+NEXT STEP IF PICKING THIS THREAD BACK UP: trace FUN_10029160's byte-
+serialization logic (or find where it calls into a smaller helper that does
+the actual node-to-bytes conversion) to get a confirmed wire format.
+
+--------------------------------------------------------------------------------
+ 6. CRITICAL SAFETY NOTE: UNINTERRUPTIBLE KERNEL HANGS
+--------------------------------------------------------------------------------
+Several vendor requests (0x8B temperature, 0xA8, 0xAE, 0xAF register writes,
+and by extension anything requiring the EPLD/detector to actually respond,
+not just identify itself) do not just fail -- a SYNCHRONOUS DeviceIoControl
+call against piusbwdf.sys for these blocks in an UNINTERRUPTIBLE kernel-mode
+wait. Confirmed repeatedly this session:
+  - Neither TerminateProcess nor PowerShell's Stop-Process -Force can kill
+    the stuck process. It lingers (Responding: True, ~0 CPU) for minutes.
+  - Only two things clear it: (a) CancelIoEx from within the SAME process,
+    called on a properly-issued OVERLAPPED request, before the handle is
+    lost -- this works cleanly and is now how every KMDF call in
+    st133_usb.py is issued (see _ioctl_overlapped()); or (b) physically
+    unplugging the USB cable, which force-cancels ALL pending I/O for the
+    device at once (needed several times this session before the overlapped-
+    I/O fix was in place).
+  - A forced pnputil /remove-device + replug can also transiently produce
+    "Unknown USB Device (Device Descriptor Request Failed)" / "(Set Address
+    Failed)" in Device Manager -- this cleared on its own after a further
+    unplug/replug and was not permanent damage.
+
+st133_usb.py's _ioctl_overlapped() helper (added this session) wraps every
+KMDF DeviceIoControl call in bounded overlapped I/O with clean CancelIoEx-
+based recovery. Do not add a new raw synchronous DeviceIoControl call
+against this device without going through it -- a single bad call can hang
+an entire process, and killing that process from outside does not work.
+
+Note the cancellation itself is not fast: in one run, a chain of hung
+requests during connect()'s handshake took ~230 seconds total to all
+individually time out and get reaped, even though each individual
+_ioctl_overlapped() call was configured for a 2-second timeout. The wait for
+CancelIoEx's own completion appears to queue behind whatever the driver is
+actually doing. Bounded, but not necessarily fast -- do not assume a hung
+request pattern means minutes of wall-clock silence is a bug.
+
+DebugView (Sysinternals) was proposed as the way to directly observe
+CheckFirmwareAndUpgrade's DbgPrint output during a fresh device arrival --
+NOT yet done. This is the most direct way to learn whether firmware upgrade
+is actually running/succeeding, rather than continuing to infer it from
+which vendor requests do and don't hang.
+
+--------------------------------------------------------------------------------
+ 7. WHAT NEEDS TO BE DONE NEXT
+--------------------------------------------------------------------------------
+1. Run DebugView during a fresh unplug/replug to capture piusbwdf.sys's own
+   CheckFirmwareAndUpgrade log output and settle whether firmware upload is
+   actually completing on this unit.
+2. If firmware upload is NOT completing, that's the real blocker -- figure
+   out why (version-read failing before the upgrade gate is even reached?
+   upload itself failing partway?) rather than continuing to treat it as a
+   Python-side protocol problem.
+3. If firmware upload IS completing but registers/temperature still don't
+   respond, trace FUN_10029160's serialization (Section 5) to get a
+   confirmed acquisition-setup buffer, since it's possible the controller is
+   simply waiting for that before it will answer anything beyond pure
+   identification.
+4. Once real pixel data is flowing, update get_temperature() -- do NOT
+   assume Word 1 of the pixel stream is an RTD value (that was Part 2's
+   claim, unverified); confirm from the same rigorous live-testing
+   methodology used this session before trusting any temperature readout.
+
+--------------------------------------------------------------------------------
+ 8. TESTING COMMANDS
+--------------------------------------------------------------------------------
+1. Run Unit Tests:
+   python -m unittest spectro_suite.tests.test_st133 -v
+
+2. Test ST-133 USB Connection (safe -- uses _ioctl_overlapped(), won't hang
+   the terminal even against unresponsive hardware):
+   python -c "from spectro_suite.hardware.detectors.st133_usb import ST133Camera; cam = ST133Camera(); print('Connected:', cam.connect()); print('Temp Info:', cam.get_temperature()); cam.disconnect()"
+
+3. Check which driver is currently bound:
+   powershell -Command "Get-PnpDevice | Where-Object { $_.InstanceId -match 'VID_0BD7&PID_A010' } | Select-Object FriendlyName, Status, Problem"
+
+4. Run Full SpectroSuite GUI:
+   python main.py
+================================================================================

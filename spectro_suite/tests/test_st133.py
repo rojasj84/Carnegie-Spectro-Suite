@@ -8,9 +8,9 @@ import numpy as np
 from spectro_suite.hardware.detectors.st133_usb import (
     ST133Camera,
     USB_SETUP_PACKET,
-    IOCTL_EZUSB_VENDOR_REQUEST,
-    IOCTL_EZUSB_BULK_READ,
-    IOCTL_EZUSB_BULK_WRITE
+    IOCTL_VENDOR_REQUEST_OUT,
+    IOCTL_VENDOR_REQUEST_IN,
+    IOCTL_READ_FRAME
 )
 
 
@@ -41,10 +41,10 @@ class TestST133Driver(unittest.TestCase):
         self.assertEqual(struct.unpack("<H", raw_bytes[8:10])[0], 0)     # wIndex
 
     def test_ioctl_constants(self):
-        """Verify driver IOCTL constants match KMDF/WDM definitions."""
-        self.assertEqual(IOCTL_EZUSB_VENDOR_REQUEST, 0x00220425)
-        self.assertEqual(IOCTL_EZUSB_BULK_READ, 0x00220429)
-        self.assertEqual(IOCTL_EZUSB_BULK_WRITE, 0x0022042E)
+        """Verify driver IOCTL constants match the real piusbwdf.sys dispatch table."""
+        self.assertEqual(IOCTL_VENDOR_REQUEST_OUT, 0x55002005)
+        self.assertEqual(IOCTL_VENDOR_REQUEST_IN, 0x5500200A)
+        self.assertEqual(IOCTL_READ_FRAME, 0x55002021)
 
     def test_timing_stream_generation(self):
         """Test opcode compilation for short and long integration times."""

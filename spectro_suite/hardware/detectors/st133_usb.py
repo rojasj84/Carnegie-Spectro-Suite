@@ -2,14 +2,45 @@
 Native 64-Bit Hardware Driver for Princeton Instruments ST-133 InGaAs Detectors.
 ================================================================================
 Controls Princeton Instruments ST-133 / OMA-V linear InGaAs detectors on 64-bit
-Windows 10/11 through direct kernel communication over USB (piusbwdf.sys / KMDF).
+Windows 10/11 through direct kernel communication over USB.
 
-Reverse-Engineered Architecture:
-  - Exact 10-byte USB setup packet matching USBDRVD.DLL & piusbwdf.sys.
-  - Native IOCTL dispatch: IOCTL_EZUSB_VENDOR_REQUEST (0x00220425 / 0x00222010),
-    IOCTL_EZUSB_BULK_READ (0x00220429 / 0x00222048), IOCTL_EZUSB_BULK_WRITE (0x0022042E).
-  - EPLD/FPGA gate-arming microcode builder derived from PIXCM32.dll (FUN_1002c88f / FUN_1002cf00).
-  - Direct 512-channel linear InGaAs photodiode digitizer reading 16-bit physical counts.
+Architecture, confirmed by decompiling the actual installed kernel driver
+(C:/Windows/System32/drivers/piusbwdf.sys, Provider: Princeton Instruments,
+package piusb3.inf) and validating live against real hardware:
+  - IOCTL 0x55002005 = vendor request OUT, 0x5500200A = vendor request IN.
+    Both take an 8-byte header [bRequest, 0,0,0, wValueLo, wValueHi, 0,0] as the
+    IOCTL *input* buffer; 0x55002005 is METHOD_IN_DIRECT, so the bytes actually
+    being written to the device go in the IOCTL *output* buffer slot, not
+    appended to the input buffer.
+  - IOCTL 0x55002021 = start an asynchronous frame read. It does not complete
+    immediately (STATUS_PENDING) -- must be issued as overlapped I/O and either
+    waited on or cleanly cancelled with CancelIoEx. Its counterpart 0x5500201C
+    cancels a pending frame read. Confirmed live: accepted and cleanly
+    cancellable; no frame data observed yet (see _build_ingaas_timing_stream).
+  - IOCTL 0x5500600E reads back the connected device's USB PID and reports
+    which of two supported hardware revisions (PID_A010 vs PID_A026) is
+    attached -- both are legitimate, not a version mismatch.
+  - VR 0xF0 (8-byte IN) and 0xF1 (2-byte IN, firmware version) respond with
+    real data on live hardware; VR 0x8B (temperature), 0xA8/0xAE/0xAF status
+    requests, and register writes for "digitizer mode"/"EPLD arm" do not --
+    the controller answers pure identification requests but not anything
+    requiring the EPLD/detector to actually operate. Root cause unconfirmed;
+    the kernel driver's own CheckFirmwareAndUpgrade routine (present in
+    piusbwdf.sys, pushes a real Cypress FX2 firmware image when the reported
+    firmware version is below 3.6 -- this unit reports 1.0) is the leading
+    candidate, unverified without capturing its DbgPrint output.
+  - Exposure time and gain are NOT sent as standalone commands. PICM_Set_exposuretime
+    (PIXCM32.dll) just stores the value as object state. The actual timing
+    program is compiled from an in-memory linked list of {count, opcode, flag}
+    instructions (PIXCM32.dll FUN_1002c88f / FUN_1002cf00) into a byte buffer by
+    FUN_10029160, then sent via a Pipp32.dll-style bulk write (PIPP_Output_Multiple)
+    before triggering the read. FUN_10029160 is a large (~100+ local variable)
+    routine shared across many PI camera modes; its exact byte-serialization has
+    NOT been fully traced, so _build_ingaas_timing_stream's byte layout below is
+    a best-effort approximation, not a confirmed wire format.
+  - Direct 512-channel linear InGaAs photodiode digitizer reading 16-bit physical
+    counts (512 pixels x 2 bytes = 1024-byte frame, matches observed ADC ceiling
+    near 60000 counts on a 16-bit unsigned readout).
 """
 
 from __future__ import annotations
@@ -39,13 +70,16 @@ OPEN_EXISTING = 3
 FILE_FLAG_OVERLAPPED = 0x40000000
 INVALID_HANDLE_VALUE = -1
 
-# Verified USB Driver IOCTL Codes (from USBDRVD.DLL & piusbwdf.sys)
-IOCTL_EZUSB_VENDOR_REQUEST = 0x00220425      # Primary KMDF vendor request
-IOCTL_EZUSB_VENDOR_REQUEST_LEGACY = 0x00222010 # WDM / legacy vendor request
-IOCTL_EZUSB_BULK_READ = 0x00220429           # Primary KMDF bulk read
-IOCTL_EZUSB_BULK_READ_LEGACY = 0x00222048    # WDM / legacy bulk read
-IOCTL_EZUSB_BULK_WRITE = 0x0022042E          # Bulk write
-IOCTL_EZUSB_RESET_PIPE = 0x0022040C
+# IOCTL codes for piusbwdf.sys, decoded directly from the driver binary's IOCTL
+# dispatch (Ghidra: ghidra_scripts/decompiled_piusbwdf.c) and confirmed live
+# against real hardware. These replace an earlier set of guessed Cypress/USBDRVD
+# -style codes that the real driver rejected outright with ERROR_INVALID_FUNCTION.
+IOCTL_VENDOR_REQUEST_OUT = 0x55002005   # METHOD_IN_DIRECT: header in input buffer, payload in output buffer
+IOCTL_VENDOR_REQUEST_IN  = 0x5500200A   # METHOD_OUT_DIRECT: header in input buffer, response in output buffer
+IOCTL_CANCEL_FRAME_READ  = 0x5500201C   # Cancel a pending IOCTL_READ_FRAME
+IOCTL_READ_FRAME         = 0x55002021   # Async/pended frame read; issue as overlapped I/O
+IOCTL_GET_DRIVER_INFO    = 0x55006002
+IOCTL_GET_USB_PID        = 0x5500600E   # Reports which of PID_A010 / PID_A026 is attached
 
 # Cypress FX/FX2 CPU Control Registers
 CYPRESS_FX2_CPUCS = 0xE600                   # Cypress FX2 (CY7C68013A) 8051 CPU Reset Register
@@ -120,7 +154,7 @@ class ST133Camera(BaseCamera):
         self._quantum_us = 153.0 # InGaAs gate integration quantum (from omavb.dat)
 
     def _find_device_path(self) -> Optional[str]:
-        """Locate active Windows PnP device path for Princeton Instruments USB (VID_0BD7&PID_A026)."""
+        """Locate active Windows PnP device path for Princeton Instruments USB (VID_0BD7&PID_A010)."""
         if not kernel32:
             return None
 
@@ -135,7 +169,7 @@ class ST133Camera(BaseCamera):
         # 1. Enumerate active PnP USB instances from Windows Registry
         try:
             import winreg
-            base = r"SYSTEM\CurrentControlSet\Enum\USB\VID_0BD7&PID_A026"
+            base = r"SYSTEM\CurrentControlSet\Enum\USB\VID_0BD7&PID_A010"
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
                 i = 0
                 while True:
@@ -143,7 +177,7 @@ class ST133Camera(BaseCamera):
                         inst = winreg.EnumKey(k, i)
                         i += 1
                         for g in target_guids:
-                            path = f"\\\\?\\USB#VID_0BD7&PID_A026#{inst}#{g}"
+                            path = f"\\\\?\\USB#VID_0BD7&PID_A010#{inst}#{g}"
                             h = kernel32.CreateFileW(
                                 path,
                                 GENERIC_READ | GENERIC_WRITE,
@@ -165,7 +199,7 @@ class ST133Camera(BaseCamera):
         # 2. Fallback to known standard device symlinks
         for g in target_guids:
             for inst_pattern in ["5&1487294b&0&5", "5&1487294b&0&6"]:
-                p = f"\\\\?\\USB#VID_0BD7&PID_A026#{inst_pattern}#{g}"
+                p = f"\\\\?\\USB#VID_0BD7&PID_A010#{inst_pattern}#{g}"
                 h = kernel32.CreateFileW(p, GENERIC_READ | GENERIC_WRITE, 3, None, OPEN_EXISTING, 0, None)
                 if h != INVALID_HANDLE_VALUE and h != 0xFFFFFFFFFFFFFFFF:
                     kernel32.CloseHandle(h)
@@ -313,52 +347,19 @@ class ST133Camera(BaseCamera):
 
     def _write_register(self, addr: int, value: int) -> bool:
         """
-        Write a controller register via the bulk-pipe packet protocol used by
-        Pipp32.dll's PIFX2 class (FUN_1000d08b): a fixed 6-byte packet
-        [0x01, addrLo, addrHi, 0x02, valLo, valHi] sent over the bulk OUT pipe.
-
-        NOTE: USBDRVD_PipeOpen's pipe index (used for this write in the original
-        driver) is a driver-internal ordinal ("PIPE02"), not a literal USB endpoint
-        address -- its physical endpoint depends on the device's live descriptor
-        enumeration order and isn't recoverable from static DLL analysis alone.
-        Endpoint 0x08 is used here as the best-evidenced default: it's the only
-        bulk OUT endpoint already confirmed to exist on this device (see the
-        WinUsb_SetPipePolicy/WinUsb_ResetPipe endpoint set). Verify against real
-        hardware and adjust if register writes don't take effect.
+        Write a controller register: bRequest=0xAF (fixed "write register" command),
+        wValue=register address, with the 2-byte value carried as payload data.
+        This exact call shape was tested live against real hardware through the
+        installed piusbwdf.sys driver -- the IOCTL is accepted with the correct
+        8-byte header / METHOD_IN_DIRECT framing (an earlier bulk-pipe-packet
+        theory, based on the older Pipp32.dll/USBDRVD.dll stack, does not apply to
+        this driver and was superseded once piusbwdf.sys was decompiled directly).
+        NOTE: acceptance by the IOCTL layer is confirmed; the controller actually
+        ACKing a register write over the wire is not -- 0x22 ("digitizer mode")
+        was issued this way live and never completed, consistent with everything
+        else observed past pure-identification requests (see module docstring).
         """
-        if not self._device_handle or not kernel32:
-            return False
-
-        packet = bytes([0x01, addr & 0xFF, (addr >> 8) & 0xFF, 0x02, value & 0xFF, (value >> 8) & 0xFF])
-        c_buf = (ctypes.c_ubyte * len(packet))(*packet)
-
-        # 1. WinUSB Direct Pipe Write (0x08)
-        if self._winusb_handle and winusb:
-            trans = wintypes.ULONG(0)
-            res = winusb.WinUsb_WritePipe(
-                self._winusb_handle,
-                0x08,  # Bulk OUT endpoint
-                c_buf,
-                len(packet),
-                ctypes.byref(trans),
-                None
-            )
-            if res and trans.value >= len(packet):
-                return True
-
-        # 2. KMDF IOCTL_EZUSB_BULK_WRITE fallback
-        bytes_ret = wintypes.DWORD(0)
-        res_ioctl = kernel32.DeviceIoControl(
-            self._device_handle,
-            IOCTL_EZUSB_BULK_WRITE,
-            c_buf,
-            len(packet),
-            None,
-            0,
-            ctypes.byref(bytes_ret),
-            None
-        )
-        return bool(res_ioctl)
+        return self._vendor_request_out(0xAF, w_value=addr, data=bytes([value & 0xFF, (value >> 8) & 0xFF]))
 
     def _vendor_request_out(
         self,
@@ -368,8 +369,14 @@ class ST133Camera(BaseCamera):
         data: Optional[bytes] = None
     ) -> bool:
         """
-        Send a vendor control OUT transfer. Uses WinUsb_ControlTransfer if WinUSB is active,
-        or DeviceIoControl with the 10-byte setup packet if KMDF is active.
+        Send a vendor control OUT transfer. Uses WinUsb_ControlTransfer if WinUSB
+        is active, or IOCTL_VENDOR_REQUEST_OUT (0x55002005) against piusbwdf.sys.
+
+        The KMDF path is METHOD_IN_DIRECT: the IOCTL *input* buffer carries only
+        the 8-byte header [bRequest, 0,0,0, wValueLo, wValueHi, 0,0] -- the actual
+        payload bytes go in the IOCTL *output* buffer slot (Direct I/O/MDL), not
+        appended to the input buffer. Passing the payload as input instead fails
+        immediately with ERROR_INSUFFICIENT_BUFFER; this shape was confirmed live.
         """
         if not self._device_handle or not kernel32:
             return False
@@ -397,33 +404,10 @@ class ST133Camera(BaseCamera):
             if res:
                 return True
 
-        # 2. KMDF DeviceIoControl Path
-        pkt = USB_SETUP_PACKET()
-        pkt.direction = 0     # OUT
-        pkt.bRequestType = 2 # Vendor
-        pkt.bRecipient = 0   # Device
-        pkt.reserved1 = 0
-        pkt.bRequest = b_request
-        pkt.reserved2 = 0
-        pkt.wValue = w_value & 0xFFFF
-        pkt.wIndex = w_index & 0xFFFF
-
-        bytes_ret = wintypes.DWORD(0)
-        for ioctl in [IOCTL_EZUSB_VENDOR_REQUEST, IOCTL_EZUSB_VENDOR_REQUEST_LEGACY]:
-            res = kernel32.DeviceIoControl(
-                self._device_handle,
-                ioctl,
-                ctypes.byref(pkt),
-                ctypes.sizeof(pkt),
-                c_buf,
-                data_len,
-                ctypes.byref(bytes_ret),
-                None
-            )
-            if res:
-                return True
-
-        return False
+        # 2. KMDF IOCTL_VENDOR_REQUEST_OUT path (piusbwdf.sys)
+        header = bytes([b_request & 0xFF, 0, 0, 0, w_value & 0xFF, (w_value >> 8) & 0xFF, 0, 0])
+        ok, _bytes_ret = self._ioctl_overlapped(IOCTL_VENDOR_REQUEST_OUT, header, c_buf, data_len)
+        return ok
 
     def _vendor_request_in(
         self,
@@ -434,6 +418,10 @@ class ST133Camera(BaseCamera):
     ) -> Optional[bytes]:
         """
         Execute a vendor control IN transfer to read bytes from controller.
+        KMDF path uses IOCTL_VENDOR_REQUEST_IN (0x5500200A) against piusbwdf.sys,
+        with the same 8-byte header format as _vendor_request_out. Confirmed live
+        for VR 0xF0 (8 bytes) and 0xF1 (2 bytes, firmware version) -- both return
+        real data through this exact call shape.
         """
         if not self._device_handle or not kernel32:
             return None
@@ -459,35 +447,72 @@ class ST133Camera(BaseCamera):
             if res and trans.value > 0:
                 return bytes(read_buf.raw[:trans.value])
 
-        # 2. KMDF DeviceIoControl Path
-        pkt = USB_SETUP_PACKET()
-        pkt.direction = 1     # IN
-        pkt.bRequestType = 2 # Vendor
-        pkt.bRecipient = 0   # Device
-        pkt.reserved1 = 0
-        pkt.bRequest = b_request
-        pkt.reserved2 = 0
-        pkt.wValue = w_value & 0xFFFF
-        pkt.wIndex = w_index & 0xFFFF
-
+        # 2. KMDF IOCTL_VENDOR_REQUEST_IN path (piusbwdf.sys)
+        header = bytes([b_request & 0xFF, 0, 0, 0, w_value & 0xFF, (w_value >> 8) & 0xFF, 0, 0])
         read_buf = ctypes.create_string_buffer(length)
-        bytes_ret = wintypes.DWORD(0)
-
-        for ioctl in [IOCTL_EZUSB_VENDOR_REQUEST, IOCTL_EZUSB_VENDOR_REQUEST_LEGACY]:
-            res = kernel32.DeviceIoControl(
-                self._device_handle,
-                ioctl,
-                ctypes.byref(pkt),
-                ctypes.sizeof(pkt),
-                read_buf,
-                length,
-                ctypes.byref(bytes_ret),
-                None
-            )
-            if res and bytes_ret.value > 0:
-                return bytes(read_buf.raw[:bytes_ret.value])
+        ok, bytes_ret = self._ioctl_overlapped(IOCTL_VENDOR_REQUEST_IN, header, read_buf, length)
+        if ok and bytes_ret > 0:
+            return bytes(read_buf.raw[:bytes_ret])
 
         return None
+
+    def _ioctl_overlapped(
+        self,
+        ioctl_code: int,
+        in_buf: Optional[bytes],
+        out_buf,
+        out_len: int,
+        timeout_ms: int = 2000
+    ) -> Tuple[bool, int]:
+        """
+        Issue a DeviceIoControl call as overlapped I/O with a bounded wait,
+        cleanly cancelling (CancelIoEx) and reaping the request if it doesn't
+        complete in time. This exists because a *synchronous* DeviceIoControl
+        against piusbwdf.sys can block in an uninterruptible kernel-mode wait
+        when the controller doesn't respond -- confirmed live: neither
+        TerminateProcess nor Stop-Process -Force could clear it, only a
+        physical USB replug (which cancels all pending I/O for the device) or
+        CancelIoEx from within the same process before the handle is lost.
+        Every KMDF call in this driver goes through this helper so a single
+        non-responding request can't hang the whole process.
+        """
+        h_event = kernel32.CreateEventW(None, True, False, None)
+        ov = OVERLAPPED()
+        ov.hEvent = h_event
+        bytes_ret = wintypes.DWORD(0)
+        in_len = len(in_buf) if in_buf else 0
+
+        res = kernel32.DeviceIoControl(
+            self._device_handle,
+            ioctl_code,
+            in_buf,
+            in_len,
+            out_buf,
+            out_len,
+            ctypes.byref(bytes_ret),
+            ctypes.byref(ov)
+        )
+        err = kernel32.GetLastError()
+
+        if res:
+            kernel32.CloseHandle(h_event)
+            return True, bytes_ret.value
+
+        if err != 997:  # not ERROR_IO_PENDING -- rejected immediately (e.g. wrong IOCTL/buffer shape)
+            kernel32.CloseHandle(h_event)
+            return False, 0
+
+        ok = False
+        wait_res = kernel32.WaitForSingleObject(h_event, timeout_ms)
+        if wait_res == 0:  # WAIT_OBJECT_0
+            ok = bool(kernel32.GetOverlappedResult(self._device_handle, ctypes.byref(ov), ctypes.byref(bytes_ret), False))
+        else:
+            kernel32.CancelIoEx(self._device_handle, ctypes.byref(ov))
+            kernel32.GetOverlappedResult(self._device_handle, ctypes.byref(ov), ctypes.byref(bytes_ret), True)
+            logger.debug(f"IOCTL 0x{ioctl_code:08X} timed out after {timeout_ms}ms, cancelled cleanly.")
+
+        kernel32.CloseHandle(h_event)
+        return ok, bytes_ret.value
 
     def _write_fx2_ram(self, addr: int, data: bytes) -> bool:
         """
@@ -613,15 +638,25 @@ class ST133Camera(BaseCamera):
 
     def _build_ingaas_timing_stream(self, exposure_time_sec: float) -> bytes:
         """
-        Build the hardware timing microcode stream for the OMA-V InGaAs array.
-        Reverse-engineered from PIXCM32.dll FUN_1002c88f / FUN_1002cf00 / FUN_1002de3c.
-        
-        Opcodes:
-          - 0xE0 / 0x20: Pre-exposure photodiode charge flush
-          - 0x44: Hardware loop repeat start
-          - 0x40: Integration gate duration (scaled to 153 us quanta)
-          - 0x46 / 0xBD: Loop repeat end and termination
-          - 0x00: ADC sample clocking and bulk FIFO push
+        Build a best-effort approximation of the hardware timing microcode for
+        the OMA-V InGaAs array. NOT a confirmed wire format -- see below.
+
+        The real mechanism (traced through PIXCM32.dll) does not build a flat
+        byte stream at all: PICM_Set_exposuretime just stores the value as
+        object state, and the actual timing program is assembled as an
+        in-memory doubly-linked list of {count: u32, opcode: u8, flag: u8}
+        instructions (FUN_1002c88f / FUN_1002cf00), which a large, shared,
+        multi-camera-mode routine (FUN_10029160, PIXCM32.dll) then compiles
+        into a byte buffer and sends via a Pipp32.dll-style bulk write
+        (PIPP_Output_Multiple) before triggering the read. FUN_10029160's
+        exact serialization has not been fully traced (100+ local variables,
+        many device-type branches) -- opcodes below are corrected against what
+        FUN_1002c88f actually emits (0xE0/0x20/0x44/0x46/0xBD/0x30; 0x40 never
+        appears despite an earlier version of this code claiming it did) but
+        the overall byte layout is still a guess, not the compiled output of
+        FUN_10029160. The confirmed way to trigger a read on the real driver
+        is IOCTL_READ_FRAME (0x55002021, see acquire_frame) -- this function's
+        output is not currently sent anywhere on that path.
         """
         quanta_count = int(max(1, (exposure_time_sec * 1_000_000.0) / self._quantum_us))
         
@@ -639,16 +674,16 @@ class ST133Camera(BaseCamera):
             # Nested loop start
             stream.append(0x44)
             stream.extend(struct.pack("<H", loops))
-            stream.append(0x40)
+            stream.append(0x30)
             stream.extend(struct.pack("<H", 0xFFFF))
             stream.append(0x46)
             stream.append(0xBD)
             
             if rem > 0:
-                stream.append(0x40)
+                stream.append(0x30)
                 stream.extend(struct.pack("<H", rem))
         else:
-            stream.append(0x40)
+            stream.append(0x30)
             stream.extend(struct.pack("<H", max(1, quanta_count)))
             
         # 3. Readout trigger & ADC pixel shift clocking for 512 channels
@@ -661,9 +696,18 @@ class ST133Camera(BaseCamera):
     def _arm_gate_and_trigger(self, exposure_time_sec: float) -> bool:
         """
         Arm the EPLD timing generator and assert the hardware acquisition trigger.
+
+        NOTE: VR 0x8D (EPLD config) and VR 0x01 (trigger) below are carried over
+        from before this driver's real IOCTL interface was known and have never
+        been tested against real hardware -- unlike 0xF0/0xF1/0x8B/0xAF/0xA8/0xAE,
+        none of which are used here. The confirmed acquisition-trigger mechanism
+        on the real driver is IOCTL_READ_FRAME itself (0x55002021, see
+        acquire_frame): issuing it starts an async pended read rather than
+        requiring a separate discrete "start" command. This method's vendor
+        requests are speculative and may be doing nothing (or the wrong thing).
         """
         timing_stream = self._build_ingaas_timing_stream(exposure_time_sec)
-        
+
         # 1. Dispatch timing microcode to EPLD register bank (Vendor Request 0x8D)
         armed = self._vendor_request_out(VR_EPLD_CONFIG, w_value=0, w_index=0, data=timing_stream)
         if not armed:
@@ -737,45 +781,19 @@ class ST133Camera(BaseCamera):
                 raw_data = np.frombuffer(read_buf.raw[:expected_bytes], dtype=np.uint16)
                 return raw_data.astype(np.int64), 1
 
-        # B. KMDF IOCTL_EZUSB_BULK_READ fallback
-        res_ioctl = kernel32.DeviceIoControl(
-            self._device_handle,
-            IOCTL_EZUSB_BULK_READ,
-            None,
-            0,
-            read_buf,
-            expected_bytes,
-            ctypes.byref(bytes_read),
-            None
-        )
-
-        if not res_ioctl or bytes_read.value < expected_bytes:
-            # Fallback to Overlapped ReadFile
-            h_event = kernel32.CreateEventW(None, True, False, None)
-            ov = OVERLAPPED()
-            ov.hEvent = h_event
-
-            res_read = kernel32.ReadFile(
-                self._device_handle,
-                read_buf,
-                expected_bytes,
-                ctypes.byref(bytes_read),
-                ctypes.byref(ov)
-            )
-            last_err = kernel32.GetLastError()
-
-            if not res_read and last_err == 997: # ERROR_IO_PENDING
-                timeout_ms = int(max(1000, exposure_time_sec * 1000 + 500))
-                wait_res = kernel32.WaitForSingleObject(h_event, timeout_ms)
-                if wait_res == 0:
-                    kernel32.GetOverlappedResult(self._device_handle, ctypes.byref(ov), ctypes.byref(bytes_read), False)
-                else:
-                    kernel32.CancelIo(self._device_handle)
-
-            kernel32.CloseHandle(h_event)
+        # B. KMDF IOCTL_READ_FRAME (piusbwdf.sys) -- confirmed live to be an
+        # asynchronous/pended request (STATUS_PENDING, not completed inline).
+        # _ioctl_overlapped() handles the overlapped-I/O dance and bounded
+        # cancellation this requires -- see its docstring for why a plain
+        # synchronous DeviceIoControl call is not safe here. Confirmed live:
+        # the request is accepted and cleanly cancellable; no frame data has
+        # been observed yet (see module docstring).
+        timeout_ms = int(max(1000, exposure_time_sec * 1000 + 500))
+        ok, bytes_ret = self._ioctl_overlapped(IOCTL_READ_FRAME, None, read_buf, expected_bytes, timeout_ms)
+        bytes_read.value = bytes_ret
 
         # 4. If Physical Pixels Received over USB DMA:
-        if bytes_read.value >= expected_bytes:
+        if ok and bytes_read.value >= expected_bytes:
             raw_data = np.frombuffer(read_buf.raw[:expected_bytes], dtype=np.uint16)
             return raw_data.astype(np.int64), 1
 
