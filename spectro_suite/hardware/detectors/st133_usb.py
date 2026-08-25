@@ -120,7 +120,7 @@ class ST133Camera(BaseCamera):
         self._quantum_us = 153.0 # InGaAs gate integration quantum (from omavb.dat)
 
     def _find_device_path(self) -> Optional[str]:
-        """Locate active Windows PnP device path for Princeton Instruments USB (VID_0BD7&PID_A010)."""
+        """Locate active Windows PnP device path for Princeton Instruments USB (VID_0BD7&PID_A026)."""
         if not kernel32:
             return None
 
@@ -131,11 +131,11 @@ class ST133Camera(BaseCamera):
             "{88bae032-5a81-49f0-bc3d-a4ff138216d6}", # USBDevice class GUID
             "{dee824ef-729b-4a0e-9c14-b7117d33a817}", # Custom WinUSB Interface GUID
         ]
-        
+
         # 1. Enumerate active PnP USB instances from Windows Registry
         try:
             import winreg
-            base = r"SYSTEM\CurrentControlSet\Enum\USB\VID_0BD7&PID_A010"
+            base = r"SYSTEM\CurrentControlSet\Enum\USB\VID_0BD7&PID_A026"
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
                 i = 0
                 while True:
@@ -143,7 +143,7 @@ class ST133Camera(BaseCamera):
                         inst = winreg.EnumKey(k, i)
                         i += 1
                         for g in target_guids:
-                            path = f"\\\\?\\USB#VID_0BD7&PID_A010#{inst}#{g}"
+                            path = f"\\\\?\\USB#VID_0BD7&PID_A026#{inst}#{g}"
                             h = kernel32.CreateFileW(
                                 path,
                                 GENERIC_READ | GENERIC_WRITE,
@@ -165,7 +165,7 @@ class ST133Camera(BaseCamera):
         # 2. Fallback to known standard device symlinks
         for g in target_guids:
             for inst_pattern in ["5&1487294b&0&5", "5&1487294b&0&6"]:
-                p = f"\\\\?\\USB#VID_0BD7&PID_A010#{inst_pattern}#{g}"
+                p = f"\\\\?\\USB#VID_0BD7&PID_A026#{inst_pattern}#{g}"
                 h = kernel32.CreateFileW(p, GENERIC_READ | GENERIC_WRITE, 3, None, OPEN_EXISTING, 0, None)
                 if h != INVALID_HANDLE_VALUE and h != 0xFFFFFFFFFFFFFFFF:
                     kernel32.CloseHandle(h)
@@ -252,14 +252,24 @@ class ST133Camera(BaseCamera):
 
     def _init_controller_handshake(self) -> bool:
         """
-        Execute the 4-parameter PIPP_Initialize handshake reverse-engineered from
-        PIXCM32.dll (FUN_1001089c / FUN_1000f0f4) and Pipp32.dll:
+        Execute the controller handshake reverse-engineered from Pipp32.dll's PIFX2
+        communication class (FUN_1000d08b / FUN_1000ddd0), reached via PISCC32.dll's
+        PISCC_CreateCommunicationObject(1) backend from PIXCM32.dll's default
+        controller constructor (ST-133 is the unlisted/default case in
+        PICM_Create_controller's type dispatch, not an explicit numbered case):
           1. Reset / Flush USB Endpoints (0x08, 0x82, 0x86).
-          2. Set Controller Mode (0x22 = 1: High-Speed 16-Bit Digitizer DMA).
-          3. Set Packet Size (0x23 = 512 bytes).
-          4. Set Sub-address (0x24 = 0).
-          5. Arm EPLD Command Decoder (0x26 = 1).
-          6. Query Hardware Revision (VR 0xF0, 0xF1, 0xA8).
+          2. Set Controller Mode (register 0x22 = 1: High-Speed 16-Bit Digitizer DMA).
+          3. Set Packet Size (register 0x23 = 512 bytes).
+          4. Set Sub-address (register 0x24 = 0).
+          5. Arm EPLD Command Decoder (register 0x26 = 1).
+          6. Query Hardware Status / Presence (VR 0xF0, 0xF1).
+
+        Registers 0x22/0x23/0x24/0x26 are NOT EP0 vendor requests -- decompiling
+        FUN_1000d08b showed they're written as 6-byte packets
+        ([0x01, addrLo, addrHi, 0x02, valLo, valHi]) over the bulk OUT pipe via
+        USBDRVD_PipeWriteTimeout, not via USBDRVD_VendorOrClassRequestOut. VR 0xF0
+        (1 byte) / 0xF1 (2 bytes) as EP0 IN reads are confirmed by direct call-site
+        matches elsewhere in the same DLL.
         """
         if not self._device_handle or not kernel32:
             return False
@@ -273,19 +283,18 @@ class ST133Camera(BaseCamera):
                     except Exception:
                         pass
 
-            # 2. Configure High-Speed 16-Bit Digitizer Mode (0x22 = 1)
             steps = []
-            steps.append(("AF/0x22", self._vendor_request_out(0xAF, w_value=0x22, data=bytes([1, 0]))))
-            steps.append(("F2/0x22", self._vendor_request_out(0xF2, w_value=0x22, data=bytes([1, 0]))))
+            # 2. Configure High-Speed 16-Bit Digitizer Mode (register 0x22 = 1)
+            steps.append(("REG/0x22", self._write_register(0x22, 1)))
 
-            # 3. Configure USB Endpoint Packet Size (0x23 = 512)
-            steps.append(("AF/0x23", self._vendor_request_out(0xAF, w_value=0x23, data=bytes([0x00, 0x02]))))
+            # 3. Configure USB Endpoint Packet Size (register 0x23 = 512)
+            steps.append(("REG/0x23", self._write_register(0x23, 512)))
 
-            # 4. Set Controller Sub-address (0x24 = 0)
-            steps.append(("AF/0x24", self._vendor_request_out(0xAF, w_value=0x24, data=bytes([0, 0]))))
+            # 4. Set Controller Sub-address (register 0x24 = 0)
+            steps.append(("REG/0x24", self._write_register(0x24, 0)))
 
-            # 5. Arm EPLD Command Decoder (0x26 = 1)
-            steps.append(("AF/0x26", self._vendor_request_out(0xAF, w_value=0x26, data=bytes([1, 0]))))
+            # 5. Arm EPLD Command Decoder (register 0x26 = 1)
+            steps.append(("REG/0x26", self._write_register(0x26, 1)))
 
             # 6. Query Hardware Status / Presence (VR 0xF0, 0xF1)
             steps.append(("F0", self._vendor_request_in(0xF0, length=1) is not None))
@@ -301,6 +310,55 @@ class ST133Camera(BaseCamera):
         except Exception as ex:
             logger.warning(f"Controller handshake notice: {ex}")
             return False
+
+    def _write_register(self, addr: int, value: int) -> bool:
+        """
+        Write a controller register via the bulk-pipe packet protocol used by
+        Pipp32.dll's PIFX2 class (FUN_1000d08b): a fixed 6-byte packet
+        [0x01, addrLo, addrHi, 0x02, valLo, valHi] sent over the bulk OUT pipe.
+
+        NOTE: USBDRVD_PipeOpen's pipe index (used for this write in the original
+        driver) is a driver-internal ordinal ("PIPE02"), not a literal USB endpoint
+        address -- its physical endpoint depends on the device's live descriptor
+        enumeration order and isn't recoverable from static DLL analysis alone.
+        Endpoint 0x08 is used here as the best-evidenced default: it's the only
+        bulk OUT endpoint already confirmed to exist on this device (see the
+        WinUsb_SetPipePolicy/WinUsb_ResetPipe endpoint set). Verify against real
+        hardware and adjust if register writes don't take effect.
+        """
+        if not self._device_handle or not kernel32:
+            return False
+
+        packet = bytes([0x01, addr & 0xFF, (addr >> 8) & 0xFF, 0x02, value & 0xFF, (value >> 8) & 0xFF])
+        c_buf = (ctypes.c_ubyte * len(packet))(*packet)
+
+        # 1. WinUSB Direct Pipe Write (0x08)
+        if self._winusb_handle and winusb:
+            trans = wintypes.ULONG(0)
+            res = winusb.WinUsb_WritePipe(
+                self._winusb_handle,
+                0x08,  # Bulk OUT endpoint
+                c_buf,
+                len(packet),
+                ctypes.byref(trans),
+                None
+            )
+            if res and trans.value >= len(packet):
+                return True
+
+        # 2. KMDF IOCTL_EZUSB_BULK_WRITE fallback
+        bytes_ret = wintypes.DWORD(0)
+        res_ioctl = kernel32.DeviceIoControl(
+            self._device_handle,
+            IOCTL_EZUSB_BULK_WRITE,
+            c_buf,
+            len(packet),
+            None,
+            0,
+            ctypes.byref(bytes_ret),
+            None
+        )
+        return bool(res_ioctl)
 
     def _vendor_request_out(
         self,
