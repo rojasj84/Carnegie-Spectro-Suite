@@ -1,0 +1,92 @@
+================================================================================
+ SPECTROSUITE: FUTURE ADD-ONS & HARDWARE ENHANCEMENT ROADMAP
+================================================================================
+Document: Future Add Ons.txt
+Target Audience: SpectroSuite Developers, System Engineers & Users
+Date: August 2026
+
+--------------------------------------------------------------------------------
+ 1. HARDWARE & CONTROLLER CONTROLS (ST-133 / INGAAS DETECTORS)
+--------------------------------------------------------------------------------
+1. Analog Pre-Amplifier Gain Switching:
+   - Feature: Add a "Detector Gain" submenu to Acquisition Menu and Properties dialog.
+   - Modes (from PIXCM32.dll experiment block 0x28F80):
+     * Low Gain (1x): Maximizes well capacity (high dynamic range) for bright emission/alignment.
+     * Medium Gain (2x): Standard balanced operational mode.
+     * High Gain (3x / 4x): Maximizes sensitivity for weak Raman and faint NIR luminescence.
+   - Driver Integration: Set `gain_index` in the EPLD configuration stream.
+
+2. Dual ADC Readout Speed Switching:
+   - Feature: Add a "Readout Speed" submenu (1 MHz vs 2 MHz / 5 MHz).
+   - Modes (from PIXCM32.dll `speed_index`):
+     * 1 MHz Precision Readout: Lowest readout noise (~15-30 e- RMS) for high SNR spectroscopy.
+     * 2 MHz / 5 MHz Fast Readout: Maximum frame rates for real-time laser alignment and kinetics.
+   - Driver Integration: Set `speed_index` in the hardware experiment block.
+
+3. Programmable Hardware Clean / Flush Cycles:
+   - Feature: Configurable pre-exposure shift-register flushes (1 to 10 cycles).
+   - Benefit: Clears accumulated thermal dark charges right before opening the integration gate.
+   - Driver Integration: Populate `clean_cycles` in the EPLD experiment block.
+
+4. External TTL Hardware Triggering:
+   - Feature: Add "Trigger Mode" options (Internal Free Run vs External TTL Input).
+   - Benefit: Hardware synchronization with pulsed lasers (e.g. Nd:YAG), optical choppers, and trigger generators.
+   - Driver Integration: Configure `trigger_mode` in the hardware experiment block.
+
+5. Shutter Synchronization Modes:
+   - Feature: Select shutter behavior (Normal Sync, Always Open, Always Closed).
+   - Benefit: "Always Open" prevents shutter vibration during continuous CW laser Raman scans.
+   - Driver Integration: Set `shutter_mode` in ST133 controller commands.
+
+6. Auto-Detection of Attached Detector Head (EEPROM / NVRAM):
+   - Feature: Automatically detect 512 vs 1024 array length upon USB connection.
+   - Driver Integration: Use `ST133Camera.get_detector_info()` to read NVRAM status registers.
+
+--------------------------------------------------------------------------------
+ 2. SPECTROSCOPIC & ACQUISITION MODES
+--------------------------------------------------------------------------------
+1. Kinetic / Time-Series Streaming:
+   - Feature: Continuous DMA streaming of N consecutive spectra with microsecond timestamps.
+   - Benefit: In-situ monitoring of chemical reactions, laser heating, and high-pressure phase transitions.
+   - Output: Export time-resolved 2D intensity maps (Time vs Wavelength vs Intensity).
+
+2. Automated Real-Time Dark / Background Subtraction:
+   - Feature: One-click "Capture Dark Reference" and "Enable Live Dark Subtraction" toggle.
+   - Benefit: Real-time removal of thermal dark current offsets and fixed-pattern noise.
+
+3. Advanced Multi-Frame Cosmic Ray Spike Rejection:
+   - Feature: Multi-frame temporal outlier rejection (comparing consecutive frames in accumulation).
+   - Benefit: Distinguishes between real narrow Raman peaks and sharp single-pixel cosmic ray hits.
+
+4. Automated Multi-Window Step-and-Glue Scanning:
+   - Feature: Automated wide-range scan combining monochromator stepping and automated stitching.
+   - Benefit: Captures 500 nm to 1700 nm continuous spectra in a single automated pass.
+
+--------------------------------------------------------------------------------
+ 3. GUI & WORKFLOW ENHANCEMENTS
+--------------------------------------------------------------------------------
+1. Dedicated ST-133 Detector Setup Dialog:
+   - Accessible via "Configuration -> Detector Settings...".
+   - Provides intuitive GUI controls for Gain, Speed, Trigger, Clean Cycles, and Dark Subtraction.
+
+2. Cryogenic LN2 Dewar Thermal Runaway Alarm:
+   - Feature: Background watchdog monitoring RTD temperature via Vendor Request 0x8B.
+   - Alert: Visual/audible warning banner if sensor temperature rises above -80 °C (Dewar empty).
+
+3. Enhanced Overlaid Spectra Manager:
+   - Feature: Side-panel table allowing individual color picking, visibility toggling, and offset shifting for Slots 1..10.
+   - Export: "Export All Overlaid Spectra" to a single multi-column CSV/ASCII file.
+
+4. Interactive Peak Deconvolution & Fitting:
+   - Feature: Select spectral region to fit Gaussian, Lorentzian, or Voigt line shapes.
+   - Output: Automated reporting of Peak Center, FWHM, Area, and Signal-to-Noise Ratio.
+
+--------------------------------------------------------------------------------
+ 4. DATA EXPORT & INTEROPERABILITY
+--------------------------------------------------------------------------------
+1. HDF5 / NeXus File Exporter:
+   - Feature: Save high-dimensional kinetic datasets, metadata, and instrument logs into standard `.h5` files.
+
+2. Automated Calibration & Measurement PDF Reports:
+   - Feature: One-click export of publication-ready figures with acquisition metadata, temperature logs, and spectrometer calibration tables.
+================================================================================
