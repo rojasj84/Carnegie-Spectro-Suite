@@ -232,8 +232,15 @@ class ST133Camera(BaseCamera):
             self.is_connected = True
             logger.info(f"Connected to ST-133 Controller (Handle: {h})")
 
-            # Bootstrap official 8051 microcode & timing table into volatile SRAM
-            self._bootstrap_firmware()
+            # NOTE: _bootstrap_firmware() is intentionally NOT called here.
+            # PI133B.DAT is a pixel/intrapixel timing-pattern table consumed in
+            # software by PI13332.dll's PICM_Define_Intrapixel_Pattern (confirmed via
+            # decompiled_PI13332.c FUN_10001a05, which parses it as a stream of 16-bit
+            # ints for lookup tables) -- it is never uploaded as 8051 code. Asserting
+            # CPU reset and writing this file into the chip's RAM overwrites whatever
+            # firmware is already resident (this controller's real ST-133 application
+            # firmware is not present anywhere in this repo or the vendor installer;
+            # it is most likely already running from onboard EEPROM at power-up).
 
             # Execute Step 7: Controller Handshake & EPLD Decoder Arming (PIPP_Initialize)
             self._init_controller_handshake()
@@ -267,21 +274,27 @@ class ST133Camera(BaseCamera):
                         pass
 
             # 2. Configure High-Speed 16-Bit Digitizer Mode (0x22 = 1)
-            self._vendor_request_out(0xAF, w_value=0x22, data=bytes([1, 0]))
-            self._vendor_request_out(0xF2, w_value=0x22, data=bytes([1, 0]))
+            steps = []
+            steps.append(("AF/0x22", self._vendor_request_out(0xAF, w_value=0x22, data=bytes([1, 0]))))
+            steps.append(("F2/0x22", self._vendor_request_out(0xF2, w_value=0x22, data=bytes([1, 0]))))
 
             # 3. Configure USB Endpoint Packet Size (0x23 = 512)
-            self._vendor_request_out(0xAF, w_value=0x23, data=bytes([0x00, 0x02]))
+            steps.append(("AF/0x23", self._vendor_request_out(0xAF, w_value=0x23, data=bytes([0x00, 0x02]))))
 
             # 4. Set Controller Sub-address (0x24 = 0)
-            self._vendor_request_out(0xAF, w_value=0x24, data=bytes([0, 0]))
+            steps.append(("AF/0x24", self._vendor_request_out(0xAF, w_value=0x24, data=bytes([0, 0]))))
 
             # 5. Arm EPLD Command Decoder (0x26 = 1)
-            self._vendor_request_out(0xAF, w_value=0x26, data=bytes([1, 0]))
+            steps.append(("AF/0x26", self._vendor_request_out(0xAF, w_value=0x26, data=bytes([1, 0]))))
 
             # 6. Query Hardware Status / Presence (VR 0xF0, 0xF1)
-            self._vendor_request_in(0xF0, length=1)
-            self._vendor_request_in(0xF1, length=2)
+            steps.append(("F0", self._vendor_request_in(0xF0, length=1) is not None))
+            steps.append(("F1", self._vendor_request_in(0xF1, length=2) is not None))
+
+            failed = [name for name, ok in steps if not ok]
+            if failed:
+                logger.warning(f"Controller handshake steps did not respond (device did not ACK): {failed}")
+                return False
 
             logger.info("ST-133 controller handshake & EPLD decoder armed successfully.")
             return True
@@ -503,25 +516,39 @@ class ST133Camera(BaseCamera):
                 pos += 3 + rec_len
 
             # 1. Assert CPU Reset (CPUCS = 1)
-            self._set_fx2_reset(True)
+            reset_asserted = self._set_fx2_reset(True)
 
             # 2. Pass 1: External RAM records (addr >= 0x2000)
+            fail_count = 0
+            attempted = 0
             for length, addr, rec_bytes in records:
                 if length > 0 and addr >= 0x2000:
-                    self._write_fx2_ram(addr, rec_bytes)
+                    attempted += 1
+                    if not self._write_fx2_ram(addr, rec_bytes):
+                        fail_count += 1
 
             # 3. Pass 2: Internal 8051 Code RAM records (addr < 0x2000)
             for length, addr, rec_bytes in records:
                 if length > 0 and addr < 0x2000:
-                    self._write_fx2_ram(addr, rec_bytes)
+                    attempted += 1
+                    if not self._write_fx2_ram(addr, rec_bytes):
+                        fail_count += 1
 
             # 4. Release CPU Reset (CPUCS = 0) to start 8051 firmware execution
-            self._set_fx2_reset(False)
+            reset_released = self._set_fx2_reset(False)
             time.sleep(0.1)
 
-            self._is_firmware_loaded = True
-            logger.info(f"Loaded {len(records)} microcode records ({len(fw_data)} bytes) into volatile SRAM (2-pass).")
-            return True
+            if not reset_asserted or not reset_released:
+                logger.warning("CPU reset assert/release was not acknowledged by the device.")
+            if fail_count:
+                logger.warning(f"Firmware upload: {fail_count}/{attempted} chunk writes were not ACKed by the device.")
+
+            self._is_firmware_loaded = (fail_count == 0 and reset_asserted and reset_released)
+            logger.info(
+                f"{'Loaded' if self._is_firmware_loaded else 'Attempted to load'} "
+                f"{len(records)} microcode records ({len(fw_data)} bytes) into volatile SRAM (2-pass)."
+            )
+            return self._is_firmware_loaded
         except Exception as ex:
             logger.warning(f"Firmware SRAM bootstrap notice: {ex}")
             return False
