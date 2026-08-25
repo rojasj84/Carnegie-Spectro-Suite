@@ -101,21 +101,26 @@ class SpectrumStitcher:
         Merge multiple overlapping spectral windows into a unified continuous spectrum.
         Uses linear blend across overlapping regions to avoid step discontinuities.
         """
-        if not wavelength_windows or not intensity_windows:
+        if not wavelength_windows or not intensity_windows or len(wavelength_windows) != len(intensity_windows):
             return np.array([]), np.array([])
 
-        all_w = np.concatenate(wavelength_windows)
+        valid_pairs = [(w, i) for w, i in zip(wavelength_windows, intensity_windows) if len(w) > 0 and len(i) > 0]
+        if not valid_pairs:
+            return np.array([]), np.array([])
+
+        w_windows, i_windows = zip(*valid_pairs)
+        all_w = np.concatenate(w_windows)
         min_w, max_w = float(np.min(all_w)), float(np.max(all_w))
 
         if step_nm is None:
-            diffs = np.diff(wavelength_windows[0])
+            diffs = np.diff(w_windows[0])
             step_nm = float(np.abs(np.mean(diffs))) if len(diffs) > 0 else 0.05
 
         grid_x = np.arange(min_w, max_w + step_nm / 2.0, step_nm)
         grid_y = np.zeros_like(grid_x)
         grid_weights = np.zeros_like(grid_x)
 
-        for w_arr, i_arr in zip(wavelength_windows, intensity_windows):
+        for w_arr, i_arr in zip(w_windows, i_windows):
             sort_idx = np.argsort(w_arr)
             w_sorted = w_arr[sort_idx]
             i_sorted = i_arr[sort_idx]

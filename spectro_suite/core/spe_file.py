@@ -122,20 +122,25 @@ def read_spe(filepath: str) -> SpeFile:
             if not _is_invalid(laser_pos) and laser_pos > 0:
                 laser_wavelength = laser_pos
 
-        dtype_info = SPE_DATA_TYPES.get(datatype, (np.float32, 4, "f"))
+        if datatype not in SPE_DATA_TYPES:
+            raise ValueError(f"Invalid datatype {datatype} found in SPE header.")
+
+        dtype_info = SPE_DATA_TYPES[datatype]
         dtype, itemsize, _ = dtype_info
 
         total_points = num_frames * ydim * xdim
         raw_data = f.read(total_points * itemsize)
+        if len(raw_data) != total_points * itemsize:
+            raise ValueError(f"File {filepath} is truncated or corrupted (expected {total_points * itemsize} bytes, got {len(raw_data)} bytes).")
+
         data = np.frombuffer(raw_data, dtype=dtype)
 
-        if len(data) == total_points:
-            if num_frames == 1 and ydim == 1:
-                data = data.reshape((xdim,))
-            elif num_frames == 1:
-                data = data.reshape((ydim, xdim))
-            else:
-                data = data.reshape((num_frames, ydim, xdim))
+        if num_frames == 1 and ydim == 1:
+            data = data.reshape((xdim,))
+        elif num_frames == 1:
+            data = data.reshape((ydim, xdim))
+        else:
+            data = data.reshape((num_frames, ydim, xdim))
 
         return SpeFile(
             data=data,

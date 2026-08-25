@@ -5,6 +5,7 @@ Spectrometer Configuration Model & Legacy CFG Parser.
 from __future__ import annotations
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
@@ -215,9 +216,16 @@ class SpectrometerConfig:
         )
 
     def save_json(self, filepath: str) -> None:
-        """Save configuration to JSON file."""
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        """Save configuration to JSON file atomically."""
+        dir_name = os.path.dirname(filepath)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=dir_name or ".", delete=False, mode="w", encoding="utf-8") as tf:
+            json.dump(self.to_dict(), tf, indent=2)
+            tf.flush()
+            os.fsync(tf.fileno())
+            temp_name = tf.name
+        os.replace(temp_name, filepath)
 
     @classmethod
     def from_json(cls, filepath: str) -> SpectrometerConfig:

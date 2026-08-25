@@ -45,6 +45,17 @@ class TestHardwareDrivers(unittest.TestCase):
         self.assertEqual(len(spectrum), self.config.num_pixels)
         self.assertGreater(spectrum.max(), 0.0)
 
+    def test_out_of_bounds_move_rejected(self):
+        self.mock_mono.connect()
+        self.assertFalse(self.mock_mono.move_to_wavelength(-50.0))
+        self.assertFalse(self.mock_mono.move_to_wavelength(5000.0))
+
+    def test_context_manager_protocol(self):
+        mono = HoribaHR460(self.config.com_port, config=self.config)
+        with mono as m:
+            self.assertIs(m, mono)
+        self.assertEqual(mono.status, MonochromatorStatus.DISCONNECTED)
+
 
 if __name__ == "__main__":
     unittest.main()

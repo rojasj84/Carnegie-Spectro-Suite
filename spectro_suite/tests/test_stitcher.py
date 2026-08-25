@@ -49,6 +49,26 @@ class TestStitcher(unittest.TestCase):
         peak_idx = np.argmin(np.abs(x_grid - 702.5))
         self.assertAlmostEqual(y_grid[peak_idx], 600.0, delta=20.0)
 
+    def test_stitch_empty_and_mismatched_windows(self):
+        # Empty inputs
+        x, y = self.stitcher.stitch_spectra([], [])
+        self.assertEqual(len(x), 0)
+        self.assertEqual(len(y), 0)
+
+        # Mismatched lengths
+        x, y = self.stitcher.stitch_spectra([np.array([1, 2, 3])], [])
+        self.assertEqual(len(x), 0)
+        self.assertEqual(len(y), 0)
+
+        # Window with empty array filtered out
+        w1 = np.linspace(680.0, 700.0, 100)
+        i1 = np.full(100, 50.0)
+        w_empty = np.array([])
+        i_empty = np.array([])
+        x, y = self.stitcher.stitch_spectra([w1, w_empty], [i1, i_empty])
+        self.assertGreater(len(x), 0)
+        self.assertEqual(len(x), len(y))
+
 
 if __name__ == "__main__":
     unittest.main()

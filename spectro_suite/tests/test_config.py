@@ -76,6 +76,15 @@ class TestSpectrometerConfig(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_atomic_save_json_in_new_directory(self):
+        cfg = SpectrometerConfig(instrument_model="HR460", com_port="COM3")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            nested_path = os.path.join(tmp_dir, "nested_folder", "test_cfg.json")
+            cfg.save_json(nested_path)
+            self.assertTrue(os.path.exists(nested_path))
+            loaded = SpectrometerConfig.from_json(nested_path)
+            self.assertEqual(loaded.com_port, "COM3")
+
 
 if __name__ == "__main__":
     unittest.main()

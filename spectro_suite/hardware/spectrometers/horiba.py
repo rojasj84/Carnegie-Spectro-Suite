@@ -92,6 +92,15 @@ class HoribaHR460:
             self.ser = None
             return False
 
+    def __enter__(self) -> HoribaHR460:
+        """Context manager entry."""
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit: disconnect serial port."""
+        self.disconnect()
+
     def disconnect(self) -> None:
         """Close serial port."""
         if self.ser and self.ser.is_open:
@@ -178,6 +187,10 @@ class HoribaHR460:
         progress_callback: Optional[Callable[[float], None]] = None
     ) -> bool:
         """Move monochromator to absolute wavelength in nm."""
+        if target_nm < 0.0 or target_nm > 3000.0:
+            logger.error(f"Target wavelength {target_nm} nm is outside valid range [0, 3000 nm].")
+            return False
+
         if not self.ser:
             return False
 
@@ -346,6 +359,9 @@ class MockHoribaHR460(HoribaHR460):
         target_nm: float,
         progress_callback: Optional[Callable[[float], None]] = None
     ) -> bool:
+        if target_nm < 0.0 or target_nm > 3000.0:
+            logger.error(f"Target wavelength {target_nm} nm is outside valid range [0, 3000 nm].")
+            return False
         self.status = MonochromatorStatus.MOVING
         start_wl = self._current_wavelength_nm
         delta = target_nm - start_wl

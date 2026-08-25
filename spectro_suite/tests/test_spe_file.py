@@ -99,6 +99,41 @@ class TestSpeFile(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_truncated_spe_file_raises_error(self):
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".spe") as tmp:
+            tmp_path = tmp.name
+
+        try:
+            write_spe(tmp_path, np.ones(512, dtype=np.float32))
+            # Truncate file mid-data section
+            with open(tmp_path, "r+b") as f:
+                f.truncate(4100 + 100)  # Only 100 bytes of data instead of 2048
+            
+            with self.assertRaises(ValueError) as ctx:
+                read_spe(tmp_path)
+            self.assertIn("truncated", str(ctx.exception).lower())
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_invalid_datatype_raises_error(self):
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".spe") as tmp:
+            tmp_path = tmp.name
+
+        try:
+            write_spe(tmp_path, np.ones(512, dtype=np.float32))
+            # Corrupt datatype code at offset 108
+            with open(tmp_path, "r+b") as f:
+                f.seek(108)
+                f.write((99).to_bytes(2, "little", signed=True))
+            
+            with self.assertRaises(ValueError) as ctx:
+                read_spe(tmp_path)
+            self.assertIn("datatype", str(ctx.exception).lower())
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 
 if __name__ == "__main__":
     unittest.main()
