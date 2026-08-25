@@ -78,6 +78,24 @@ class TestST133Driver(unittest.TestCase):
         self.assertEqual(temp_info["status_str"], "OFFLINE")
         self.assertEqual(temp_info["status"], 0)
 
+    def test_detector_info_and_1024_support(self):
+        """Verify detector info reporting and 1024-pixel timing generation."""
+        info = self.cam.get_detector_info()
+        self.assertIn("xdim", info)
+        self.assertEqual(info["xdim"], 512)
+
+        # Test 1024-channel configuration
+        cam1024 = ST133Camera(num_pixels=1024)
+        info1024 = cam1024.get_detector_info()
+        self.assertEqual(info1024["xdim"], 1024)
+
+        stream1024 = cam1024._build_ingaas_timing_stream(0.1)
+        # Check ADC clock opcode 0x00 followed by little-endian 1024 (0x0400)
+        self.assertEqual(stream1024[-4], 0x00)
+        self.assertEqual(stream1024[-3], 0x00)
+        self.assertEqual(stream1024[-2], 0x04)
+        self.assertEqual(stream1024[-1], 0xBD)
+
 
 if __name__ == "__main__":
     unittest.main()

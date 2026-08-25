@@ -580,3 +580,26 @@ class ST133Camera(BaseCamera):
             "is_simulated": False
         }
 
+    def get_detector_info(self) -> dict:
+        """
+        Query physical detector head geometry and identification from controller NVRAM / status registers.
+        Returns active pixel geometry (e.g. xdim=512 or 1024, ydim=1), model name, and connection state.
+        """
+        info = {
+            "model": self.camera_model_name,
+            "xdim": self.num_pixels,
+            "ydim": 1,
+            "is_connected": self.is_connected,
+            "is_simulated": False
+        }
+        if self.is_connected and self._device_handle and kernel32:
+            resp = self._vendor_request_in(VR_READ_STATUS, length=16)
+            if resp and len(resp) >= 4:
+                # Parse geometry from status descriptor [flags (2B), xdim (2B), ...]
+                xdim = struct.unpack("<H", resp[2:4])[0]
+                if xdim in (256, 512, 1024, 2048):
+                    info["xdim"] = xdim
+                    self.num_pixels = xdim
+                    logger.info(f"Detected physical array geometry from hardware: {xdim} active pixels.")
+        return info
+
