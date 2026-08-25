@@ -1,9 +1,9 @@
 ================================================================================
- SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 & HORIBA HR460 64-BIT DRIVER GUIDE
+ CARNEGIE SPECTRO SUITE: ST-133 INGAAS & ACTON / HORIBA 64-BIT DRIVER GUIDE
 ================================================================================
 Document: AI Instructions.txt
 Target Audience: AI Coding Agents & Systems Engineers
-Project: SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Project: Carnegie Spectro Suite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
 Date: August 2026
 
 --------------------------------------------------------------------------------

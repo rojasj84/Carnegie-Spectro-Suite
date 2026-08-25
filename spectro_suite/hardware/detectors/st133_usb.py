@@ -331,6 +331,7 @@ class ST133Camera(BaseCamera):
             return True
 
         candidates = [
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "firmware", "PI133B.DAT"),
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "disassembly_dlls", "PI133B.DAT"),
             os.path.join(os.path.dirname(__file__), "PI133B.DAT"),
             r"C:\Program Files\Common Files\Princeton Instruments\Picam\Runtime\pi133b.dat",

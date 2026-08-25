@@ -53,7 +53,7 @@ class HoribaApp(ctk.CTk):
     ):
         super().__init__()
 
-        self.title("Spectrometer & Detector Control Suite")
+        self.title("Carnegie Spectro Suite")
         self.geometry("1240x820")
         self.minsize(1050, 700)
 

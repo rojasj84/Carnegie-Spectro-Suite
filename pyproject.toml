@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "spectro-suite"
+name = "carnegie-spectro-suite"
 version = "2.0.0"
-description = "Universal Hardware-Agnostic Spectrometry Suite for Multi-Vendor Spectrometers & Detectors (Acton SpectraPro, Horiba HR460, PI-MTE, WinSpec)"
+description = "Carnegie Spectro Suite: Modern 64-Bit Spectrometry & Raman Acquisition Suite for Multi-Vendor Instruments & Detectors"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
@@ -21,6 +21,6 @@ windows = [
 ]
 
 [project.scripts]
+carnegie-spectro = "spectro_suite.cli:main"
 spectro-suite = "spectro_suite.cli:main"
 spectro = "spectro_suite.cli:main"
-horiba-hr460 = "spectro_suite.cli:main"

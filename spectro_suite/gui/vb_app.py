@@ -1141,12 +1141,12 @@ class VBFormApp(tk.Tk):
         model = getattr(self.sp_config, "instrument_model", "Spectrometer")
         port = getattr(self.sp_config, "com_port", "COM")
         mode = " [Demo Mode]" if getattr(self, "force_mock", False) else ""
-        self.title(f"Spectrometer Suite ({model} on {port}){mode}")
+        self.title(f"Carnegie Spectro Suite ({model} on {port}){mode}")
 
     def _open_help_dialog(self):
         messagebox.showinfo(
-            "Spectrometer Suite Help",
-            "Universal Spectrometer & Detector Control Suite\n\n"
+            "Carnegie Spectro Suite Help",
+            "Carnegie Spectro Suite: Modern 64-Bit Spectrometry & Raman Acquisition\n\n"
             "- Use 'Go 1' for single spectrum acquisition\n"
             "- Use 'Go N' for multi-accumulation with cosmic ray removal\n"
             "- Use 'Focus' for real-time alignment and continuous acquisition\n"
@@ -1158,12 +1158,13 @@ class VBFormApp(tk.Tk):
         g = self.sp_config.active_grating
         cam_type = getattr(self.sp_config, "camera_model", "Simulated Detector")
         messagebox.showinfo(
-            "About Spectrometer Suite",
-            "Universal Spectrometer & Detector Control Suite\n\n"
+            "About Carnegie Spectro Suite",
+            "Carnegie Spectro Suite\n"
+            "High-Pressure Spectroscopy & Optical Raman Software\n\n"
             f"Spectrometer: {self.sp_config.instrument_model} (Focal length {g.focal_length_mm:.0f} mm)\n"
             f"Detector: {cam_type} ({self.sp_config.num_pixels} pixels)\n"
             f"Communication: {self.sp_config.com_port} @ {self.sp_config.baudrate} baud\n"
-            "Architecture: Multi-vendor Monochromator & Modular Detector Drivers"
+            "Architecture: Native 64-Bit Multi-Vendor Drivers"
         )
 
     # Prompt dialog helpers

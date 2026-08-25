@@ -1,8 +1,8 @@
 """
-Main Entry Point for Universal Spectrometer & Detector Control Suite.
-=====================================================================
+Main Entry Point for Carnegie Spectro Suite.
+============================================
 Running this file directly (or double-clicking it) launches the
-Graphical User Interface (GUI) immediately.
+Carnegie Spectro Suite Graphical User Interface (GUI) immediately.
 """
 
 from __future__ import annotations
