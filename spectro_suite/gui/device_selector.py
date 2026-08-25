@@ -23,6 +23,7 @@ try:
         scan_hardware_ports,
         clear_default_settings
     )
+    from .fonts import setup_app_fonts, get_ui_font, get_heading_font
 except (ImportError, ValueError):
     import sys
     from pathlib import Path
@@ -35,6 +36,7 @@ except (ImportError, ValueError):
         scan_hardware_ports,
         clear_default_settings
     )
+    from spectro_suite.gui.fonts import setup_app_fonts, get_ui_font, get_heading_font
 
 
 class DeviceSelectorDialog:
@@ -57,6 +59,8 @@ class DeviceSelectorDialog:
             self.root = tk.Toplevel(parent)
             self.root.transient(parent)
             self.root.grab_set()
+
+        setup_app_fonts(self.root)
 
         self.root.title("Spectrometer & Detector Setup")
         self.root.geometry("560x520")
@@ -88,7 +92,7 @@ class DeviceSelectorDialog:
         lbl_title = tk.Label(
             hdr_frame,
             text="Spectrometer & Detector Setup",
-            font=("Segoe UI", 13, "bold"),
+            font=get_heading_font(13),
             fg="#F8FAFC",
             bg="#1E293B"
         )
@@ -97,7 +101,7 @@ class DeviceSelectorDialog:
         lbl_sub = tk.Label(
             hdr_frame,
             text="Select your instrument profile or scan connected COM ports.",
-            font=("Segoe UI", 9),
+            font=get_ui_font(9),
             fg="#94A3B8",
             bg="#1E293B"
         )

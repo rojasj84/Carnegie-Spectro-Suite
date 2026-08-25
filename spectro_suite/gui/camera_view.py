@@ -31,6 +31,7 @@ except ImportError:
 
 from ..hardware.base import Camera
 from ..hardware.detectors.blackfly import BlackflySCamera, MockBlackflySCamera
+from .fonts import get_ui_font, get_heading_font
 
 logger = logging.getLogger("spectro_suite")
 
@@ -160,7 +161,7 @@ class CameraDisplayWindow(tk.Toplevel):
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=6, pady=2)
 
         # Color Mode
-        ttk.Label(toolbar, text="Color Mode:", font=("Tahoma", 8, "bold")).pack(side="left", padx=(2, 2))
+        ttk.Label(toolbar, text="Color Mode:", font=get_ui_font(9, "bold")).pack(side="left", padx=(2, 2))
         self.cmb_color = ttk.Combobox(
             toolbar,
             values=["RGB Color", "Grayscale (Mono)", "Heatmap (Jet)", "Viridis", "Inferno"],
@@ -182,7 +183,7 @@ class CameraDisplayWindow(tk.Toplevel):
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=6, pady=2)
 
         # FPS indicator
-        self.lbl_fps = ttk.Label(toolbar, text="FPS: --", font=("Tahoma", 8, "bold"))
+        self.lbl_fps = ttk.Label(toolbar, text="FPS: --", font=get_ui_font(9, "bold"))
         self.lbl_fps.pack(side="right", padx=6)
 
         # 2. Main Content Area (Video Canvas + Right Panel + Bottom Profile)
@@ -222,16 +223,16 @@ class CameraDisplayWindow(tk.Toplevel):
         dev_frame.pack(fill="x", pady=(0, 8))
 
         model_text = getattr(self.camera, "device_model", "FLIR Blackfly S")
-        self.lbl_dev_model = ttk.Label(dev_frame, text=f"Model: {model_text}", font=("Tahoma", 8, "bold"))
+        self.lbl_dev_model = ttk.Label(dev_frame, text=f"Model: {model_text}", font=get_ui_font(9, "bold"))
         self.lbl_dev_model.pack(anchor="w")
 
         sn_text = getattr(self.camera, "serial_number", "N/A")
-        self.lbl_dev_sn = ttk.Label(dev_frame, text=f"S/N: {sn_text}", font=("Tahoma", 8))
+        self.lbl_dev_sn = ttk.Label(dev_frame, text=f"S/N: {sn_text}", font=get_ui_font(9))
         self.lbl_dev_sn.pack(anchor="w")
 
         w_val = getattr(self.camera, "width", 1616)
         h_val = getattr(self.camera, "height", 1240)
-        self.lbl_dev_res = ttk.Label(dev_frame, text=f"Sensor: {w_val} x {h_val}", font=("Tahoma", 8))
+        self.lbl_dev_res = ttk.Label(dev_frame, text=f"Sensor: {w_val} x {h_val}", font=get_ui_font(9))
         self.lbl_dev_res.pack(anchor="w")
 
         # Exposure Control
@@ -272,7 +273,7 @@ class CameraDisplayWindow(tk.Toplevel):
         roi_frame = ttk.LabelFrame(right_panel, text=" Vertical ROI Stripe ", padding=6)
         roi_frame.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(roi_frame, text="Top / Bottom Boundary:", font=("Tahoma", 8)).pack(anchor="w")
+        ttk.Label(roi_frame, text="Top / Bottom Boundary:", font=get_ui_font(9)).pack(anchor="w")
         self.var_roi_center = tk.DoubleVar(value=50.0)
         scale_roi = ttk.Scale(roi_frame, from_=10.0, to_=90.0, variable=self.var_roi_center, command=self._on_slider_roi)
         scale_roi.pack(fill="x", pady=(2, 0))
@@ -280,21 +281,21 @@ class CameraDisplayWindow(tk.Toplevel):
         # Pixel Probing Readout
         probe_frame = ttk.LabelFrame(right_panel, text=" Pixel Probe ", padding=6)
         probe_frame.pack(fill="x", pady=(0, 8))
-        self.lbl_probe_pos = ttk.Label(probe_frame, text="Position: (X: --, Y: --)", font=("Tahoma", 8))
+        self.lbl_probe_pos = ttk.Label(probe_frame, text="Position: (X: --, Y: --)", font=get_ui_font(9))
         self.lbl_probe_pos.pack(anchor="w")
-        self.lbl_probe_val = ttk.Label(probe_frame, text="Intensity: --", font=("Tahoma", 8, "bold"))
+        self.lbl_probe_val = ttk.Label(probe_frame, text="Intensity: --", font=get_ui_font(9, "bold"))
         self.lbl_probe_val.pack(anchor="w")
-        self.lbl_peak_val = ttk.Label(probe_frame, text="Max Peak: --", font=("Tahoma", 8))
+        self.lbl_peak_val = ttk.Label(probe_frame, text="Max Peak: --", font=get_ui_font(9))
         self.lbl_peak_val.pack(anchor="w")
 
         # 4. Status Bar
         self.statusbar = ttk.Frame(self, relief="sunken", padding=(4, 2))
         self.statusbar.pack(side="bottom", fill="x")
 
-        self.sbr_text = ttk.Label(self.statusbar, text="Status: Streaming Live", font=("Tahoma", 8))
+        self.sbr_text = ttk.Label(self.statusbar, text="Status: Streaming Live", font=get_ui_font(9))
         self.sbr_text.pack(side="left")
 
-        self.sbr_mode = ttk.Label(self.statusbar, text="Mode: Hardware Connected", font=("Tahoma", 8, "bold"))
+        self.sbr_mode = ttk.Label(self.statusbar, text="Mode: Hardware Connected", font=get_ui_font(9, "bold"))
         self.sbr_mode.pack(side="right")
 
     def _on_canvas_configure(self, event):
@@ -603,7 +604,7 @@ class CameraDisplayWindow(tk.Toplevel):
                 )
                 self._roi_text_id = self.canvas.create_text(
                     offset_x + 8, y_top + 10,
-                    text="Spectral ROI", fill="#38BDF8", anchor="w", font=("Tahoma", 8, "bold")
+                    text="Spectral ROI", fill="#38BDF8", anchor="w", font=get_ui_font(9, "bold")
                 )
             else:
                 self.canvas.coords(self._roi_rect_id, offset_x, y_top, offset_x + disp_w, y_bot)
@@ -624,8 +625,8 @@ class CameraDisplayWindow(tk.Toplevel):
             if len(coords) >= 4:
                 if self._spec_line_id is None:
                     self._spec_line_id = self.spectrum_canvas.create_line(coords, fill="#38BDF8", width=2, smooth=True)
-                    self._spec_text_max_id = self.spectrum_canvas.create_text(8, 12, text=f"Peak: {max_peak:.0f} ADU", fill="#94A3B8", anchor="w", font=("Tahoma", 8))
-                    self._spec_text_pix_id = self.spectrum_canvas.create_text(self._spec_w - 8, 12, text=f"{payload['num_pixels']} Pixels", fill="#94A3B8", anchor="e", font=("Tahoma", 8))
+                    self._spec_text_max_id = self.spectrum_canvas.create_text(8, 12, text=f"Peak: {max_peak:.0f} ADU", fill="#94A3B8", anchor="w", font=get_ui_font(9))
+                    self._spec_text_pix_id = self.spectrum_canvas.create_text(self._spec_w - 8, 12, text=f"{payload['num_pixels']} Pixels", fill="#94A3B8", anchor="e", font=get_ui_font(9))
                 else:
                     self.spectrum_canvas.coords(self._spec_line_id, *coords)
                     self.spectrum_canvas.coords(self._spec_text_pix_id, self._spec_w - 8, 12)

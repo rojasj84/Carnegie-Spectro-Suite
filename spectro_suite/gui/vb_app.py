@@ -30,6 +30,7 @@ try:
     from ..hardware.factory import create_spectrometer, create_camera
     from ..core.profiles import load_app_settings, clear_default_settings
     from .device_selector import DeviceSelectorDialog
+    from .fonts import setup_app_fonts, get_ui_font, get_heading_font, get_mono_font
 except (ImportError, ValueError):
     import sys
     from pathlib import Path
@@ -43,6 +44,7 @@ except (ImportError, ValueError):
     from spectro_suite.hardware.factory import create_spectrometer, create_camera
     from spectro_suite.core.profiles import load_app_settings, clear_default_settings
     from spectro_suite.gui.device_selector import DeviceSelectorDialog
+    from spectro_suite.gui.fonts import setup_app_fonts, get_ui_font, get_heading_font, get_mono_font
 
 
 class VBFormApp(tk.Tk):
@@ -57,6 +59,8 @@ class VBFormApp(tk.Tk):
         config: Optional[SpectrometerConfig] = None
     ):
         super().__init__()
+
+        setup_app_fonts(self, base_size=9)
 
         self.geometry("1100x780")
         self.minsize(980, 680)
@@ -283,32 +287,32 @@ class VBFormApp(tk.Tk):
         self.action_frame.pack(side="top", fill="x")
 
         # Large action buttons (matching btnFocus, btnAutoXY, btnGo, btnGoN, btnStop)
-        self.btn_focus_main = tk.Button(self.action_frame, text="Focus", width=8, font=("Tahoma", 9, "bold"),
+        self.btn_focus_main = tk.Button(self.action_frame, text="Focus", width=8, font=get_ui_font(9, "bold"),
                                         bg="#E0E0E0", relief="raised", command=self._on_toggle_focus)
         self.btn_focus_main.pack(side="left", padx=3)
 
-        self.btn_autoxy_main = tk.Button(self.action_frame, text="AutoXY", width=8, font=("Tahoma", 9),
+        self.btn_autoxy_main = tk.Button(self.action_frame, text="AutoXY", width=8, font=get_ui_font(9),
                                          bg="#E0E0E0", relief="raised", command=self._on_autoscale)
         self.btn_autoxy_main.pack(side="left", padx=3)
 
-        self.btn_go_main = tk.Button(self.action_frame, text="Go 1", width=8, font=("Tahoma", 9, "bold"),
+        self.btn_go_main = tk.Button(self.action_frame, text="Go 1", width=8, font=get_ui_font(9, "bold"),
                                      bg="#D0E8D0", relief="raised", command=self._on_acquire_single)
         self.btn_go_main.pack(side="left", padx=3)
 
-        self.btn_gon_main = tk.Button(self.action_frame, text="Go N", width=8, font=("Tahoma", 9, "bold"),
+        self.btn_gon_main = tk.Button(self.action_frame, text="Go N", width=8, font=get_ui_font(9, "bold"),
                                       bg="#D0E8D0", relief="raised", command=self._on_acquire_multi)
         self.btn_gon_main.pack(side="left", padx=3)
 
-        self.btn_stop_main = tk.Button(self.action_frame, text="STOP", width=8, font=("Tahoma", 9, "bold"),
+        self.btn_stop_main = tk.Button(self.action_frame, text="STOP", width=8, font=get_ui_font(9, "bold"),
                                        bg="#FFD0D0", fg="#AA0000", relief="raised", command=self._on_stop)
         self.btn_stop_main.pack(side="left", padx=3)
 
-        self.btn_cam_view_main = tk.Button(self.action_frame, text="📷 Camera View", font=("Tahoma", 9, "bold"),
+        self.btn_cam_view_main = tk.Button(self.action_frame, text="📷 Camera View", font=get_ui_font(9, "bold"),
                                            bg="#E0ECF8", relief="raised", command=self._open_camera_view)
         self.btn_cam_view_main.pack(side="left", padx=5)
 
         # Hardware connection icon / status badge
-        self.lbl_conn_indicator = tk.Label(self.action_frame, text="● CONNECTING...", font=("Tahoma", 9, "bold"),
+        self.lbl_conn_indicator = tk.Label(self.action_frame, text="● CONNECTING...", font=get_ui_font(9, "bold"),
                                            fg="#0284C7", relief="groove", padx=6, pady=2)
         self.lbl_conn_indicator.pack(side="right", padx=5)
 
@@ -341,13 +345,13 @@ class VBFormApp(tk.Tk):
         right_panel.pack_propagate(False)
 
         # --- Acc. time ---
-        ttk.Label(right_panel, text="Acc. time (s)", font=("Tahoma", 8, "bold")).pack(anchor="w", pady=(0, 1))
+        ttk.Label(right_panel, text="Acc. time (s)", font=get_ui_font(9, "bold")).pack(anchor="w", pady=(0, 1))
         self.txt_time = ttk.Entry(right_panel, width=16)
         self.txt_time.insert(0, f"{self.sp_config.active_grating.exposure_time_sec:.2f}")
         self.txt_time.pack(fill="x", pady=(0, 6))
 
         # --- Pos. nm (HR460 Center Wavelength) ---
-        ttk.Label(right_panel, text="Pos. nm", font=("Tahoma", 8, "bold")).pack(anchor="w", pady=(0, 1))
+        ttk.Label(right_panel, text="Pos. nm", font=get_ui_font(9, "bold")).pack(anchor="w", pady=(0, 1))
         pos_row = ttk.Frame(right_panel)
         pos_row.pack(fill="x", pady=(0, 2))
         self.pos_hr460 = ttk.Entry(pos_row, width=10)
@@ -364,7 +368,7 @@ class VBFormApp(tk.Tk):
         ttk.Button(jog_frame, text="+5", width=3, command=lambda: self._jog_wavelength(5.0)).pack(side="left", expand=True, fill="x")
 
         # --- Slit, mkm ---
-        ttk.Label(right_panel, text="Slit, µm", font=("Tahoma", 8, "bold")).pack(anchor="w", pady=(0, 1))
+        ttk.Label(right_panel, text="Slit, µm", font=get_ui_font(9, "bold")).pack(anchor="w", pady=(0, 1))
         slit_row = ttk.Frame(right_panel)
         slit_row.pack(fill="x", pady=(0, 6))
         self.txt_slit = ttk.Entry(slit_row, width=10)
@@ -373,7 +377,7 @@ class VBFormApp(tk.Tk):
         ttk.Button(slit_row, text="Set", width=4, command=self._on_set_slit).pack(side="right", padx=(2, 0))
 
         # --- Grating ---
-        ttk.Label(right_panel, text="Grating (g/mm)", font=("Tahoma", 8, "bold")).pack(anchor="w", pady=(0, 1))
+        ttk.Label(right_panel, text="Grating (g/mm)", font=get_ui_font(9, "bold")).pack(anchor="w", pady=(0, 1))
         grating_vals = [
             f"{g.grating_grooves_per_mm:.0f}" for g in self.sp_config.gratings
         ]
@@ -383,7 +387,7 @@ class VBFormApp(tk.Tk):
         self.cmb_grating.bind("<<ComboboxSelected>>", self._on_select_grating_combo)
 
         # --- Scaling (Units) ---
-        ttk.Label(right_panel, text="Scaling", font=("Tahoma", 8, "bold")).pack(anchor="w", pady=(0, 1))
+        ttk.Label(right_panel, text="Scaling", font=get_ui_font(9, "bold")).pack(anchor="w", pady=(0, 1))
         unit_vals = [u.value for u in Units]
         self.cmb_xscale = ttk.Combobox(right_panel, values=unit_vals, state="readonly")
         self.cmb_xscale.set(self.current_unit.value)
@@ -391,7 +395,7 @@ class VBFormApp(tk.Tk):
         self.cmb_xscale.bind("<<ComboboxSelected>>", self._on_change_units_combo)
 
         # --- Laser, nm ---
-        ttk.Label(right_panel, text="Laser, nm", font=("Tahoma", 8, "bold")).pack(anchor="w", pady=(0, 1))
+        ttk.Label(right_panel, text="Laser, nm", font=get_ui_font(9, "bold")).pack(anchor="w", pady=(0, 1))
         laser_row = ttk.Frame(right_panel)
         laser_row.pack(fill="x", pady=(0, 6))
         self.cmb_laser = ttk.Entry(laser_row, width=10)
@@ -402,32 +406,32 @@ class VBFormApp(tk.Tk):
         # --- Mouse Pos. Box (lblMouse, lblMsPix, lblMsX, lblMsY) ---
         lbl_mouse_box = ttk.LabelFrame(right_panel, text="Mouse Pos.", padding=3)
         lbl_mouse_box.pack(fill="x", pady=(0, 4))
-        self.lbl_ms_pix = ttk.Label(lbl_mouse_box, text="Pxl: --", font=("Tahoma", 8))
+        self.lbl_ms_pix = ttk.Label(lbl_mouse_box, text="Pxl: --", font=get_ui_font(9))
         self.lbl_ms_pix.pack(anchor="w")
-        self.lbl_ms_x = ttk.Label(lbl_mouse_box, text="X: --", font=("Tahoma", 8))
+        self.lbl_ms_x = ttk.Label(lbl_mouse_box, text="X: --", font=get_ui_font(9))
         self.lbl_ms_x.pack(anchor="w")
-        self.lbl_ms_y = ttk.Label(lbl_mouse_box, text="Y: --", font=("Tahoma", 8))
+        self.lbl_ms_y = ttk.Label(lbl_mouse_box, text="Y: --", font=get_ui_font(9))
         self.lbl_ms_y.pack(anchor="w")
 
         # --- Cursor Pos. Box (lblCursor, lblCurPix, lblCurX, lblCurY) ---
         lbl_cursor_box = ttk.LabelFrame(right_panel, text="Cursor Pos.", padding=3)
         lbl_cursor_box.pack(fill="x", pady=(0, 4))
-        self.lbl_cur_pix = ttk.Label(lbl_cursor_box, text="Pxl: --", font=("Tahoma", 8))
+        self.lbl_cur_pix = ttk.Label(lbl_cursor_box, text="Pxl: --", font=get_ui_font(9))
         self.lbl_cur_pix.pack(anchor="w")
-        self.lbl_cur_x = ttk.Label(lbl_cursor_box, text="X: --", font=("Tahoma", 8))
+        self.lbl_cur_x = ttk.Label(lbl_cursor_box, text="X: --", font=get_ui_font(9))
         self.lbl_cur_x.pack(anchor="w")
-        self.lbl_cur_y = ttk.Label(lbl_cursor_box, text="Y: --", font=("Tahoma", 8))
+        self.lbl_cur_y = ttk.Label(lbl_cursor_box, text="Y: --", font=get_ui_font(9))
         self.lbl_cur_y.pack(anchor="w")
 
         # --- Pressure & Temperature Box (lblPress, lblTemp, txtTemp) ---
         lbl_press_box = ttk.LabelFrame(right_panel, text="Pressure (Ruby)", padding=3)
         lbl_press_box.pack(fill="x", pady=(0, 4))
-        self.lbl_press = ttk.Label(lbl_press_box, text="P: -- GPa", font=("Tahoma", 8, "bold"), foreground="#000088")
+        self.lbl_press = ttk.Label(lbl_press_box, text="P: -- GPa", font=get_ui_font(9, "bold"), foreground="#000088")
         self.lbl_press.pack(anchor="w")
 
         temp_row = ttk.Frame(lbl_press_box)
         temp_row.pack(fill="x", pady=(2, 0))
-        ttk.Label(temp_row, text="T, K:", font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(temp_row, text="T, K:", font=get_ui_font(9)).pack(side="left")
         self.txt_temp = ttk.Entry(temp_row, width=8)
         self.txt_temp.insert(0, f"{self.ruby_temperature:.1f}")
         self.txt_temp.pack(side="right")
@@ -460,25 +464,25 @@ class VBFormApp(tk.Tk):
         self.statusbar = ttk.Frame(self, relief="sunken", borderwidth=1)
         self.statusbar.pack(side="bottom", fill="x")
 
-        self.sbr_model = ttk.Label(self.statusbar, text=f"Model: {self.sp_config.instrument_model}", relief="groove", padding=(4, 2), font=("Tahoma", 8, "bold"))
+        self.sbr_model = ttk.Label(self.statusbar, text=f"Model: {self.sp_config.instrument_model}", relief="groove", padding=(4, 2), font=get_ui_font(9, "bold"))
         self.sbr_model.pack(side="left", padx=1)
 
-        self.sbr_port = ttk.Label(self.statusbar, text=f"Port: {self.sp_config.com_port} {self.sp_config.baudrate},N,8,1", relief="groove", padding=(4, 2), font=("Tahoma", 8))
+        self.sbr_port = ttk.Label(self.statusbar, text=f"Port: {self.sp_config.com_port} {self.sp_config.baudrate},N,8,1", relief="groove", padding=(4, 2), font=get_ui_font(9))
         self.sbr_port.pack(side="left", padx=1)
 
-        self.sbr_status = ttk.Label(self.statusbar, text="Status: Ready", relief="groove", padding=(6, 2), font=("Tahoma", 8))
+        self.sbr_status = ttk.Label(self.statusbar, text="Status: Ready", relief="groove", padding=(6, 2), font=get_ui_font(9))
         self.sbr_status.pack(side="left", fill="x", expand=True, padx=1)
 
-        self.sbr_temp = ttk.Label(self.statusbar, text="CCD Temp: --.- °C", relief="groove", padding=(4, 2), font=("Tahoma", 8, "bold"), foreground="#006600")
+        self.sbr_temp = ttk.Label(self.statusbar, text="CCD Temp: --.- °C", relief="groove", padding=(4, 2), font=get_ui_font(9, "bold"), foreground="#006600")
         self.sbr_temp.pack(side="left", padx=1)
 
-        self.sbr_time = ttk.Label(self.statusbar, text="Time Left: 0.0s", relief="groove", padding=(4, 2), font=("Tahoma", 8))
+        self.sbr_time = ttk.Label(self.statusbar, text="Time Left: 0.0s", relief="groove", padding=(4, 2), font=get_ui_font(9))
         self.sbr_time.pack(side="left", padx=1)
 
-        self.sbr_grating = ttk.Label(self.statusbar, text=f"Grating: {self.sp_config.active_grating.grating_grooves_per_mm:.0f} g/mm", relief="groove", padding=(4, 2), font=("Tahoma", 8))
+        self.sbr_grating = ttk.Label(self.statusbar, text=f"Grating: {self.sp_config.active_grating.grating_grooves_per_mm:.0f} g/mm", relief="groove", padding=(4, 2), font=get_ui_font(9))
         self.sbr_grating.pack(side="left", padx=1)
 
-        self.sbr_pos = ttk.Label(self.statusbar, text=f"Position: {self.sp_config.active_grating.spectrometer_pos_nm:.2f} nm", relief="groove", padding=(4, 2), font=("Tahoma", 8))
+        self.sbr_pos = ttk.Label(self.statusbar, text=f"Position: {self.sp_config.active_grating.spectrometer_pos_nm:.2f} nm", relief="groove", padding=(4, 2), font=get_ui_font(9))
         self.sbr_pos.pack(side="left", padx=1)
 
     def _safe_ui(self, fn: Callable[[], Any]) -> None:
@@ -1246,7 +1250,7 @@ class PropertiesDialog(tk.Toplevel):
         # Instrument Model
         r0 = ttk.Frame(tab_port)
         r0.pack(fill="x", pady=4)
-        ttk.Label(r0, text="Model:", width=14, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r0, text="Model:", width=14, font=get_ui_font(9)).pack(side="left")
         self.cbo_model = ttk.Combobox(r0, values=["HR460", "ACTON"], state="readonly", width=16)
         self.cbo_model.set(self.parent.sp_config.instrument_model)
         self.cbo_model.pack(side="left")
@@ -1254,7 +1258,7 @@ class PropertiesDialog(tk.Toplevel):
         # Port
         r1 = ttk.Frame(tab_port)
         r1.pack(fill="x", pady=4)
-        ttk.Label(r1, text="Port:", width=14, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r1, text="Port:", width=14, font=get_ui_font(9)).pack(side="left")
         self.cbo_port = ttk.Combobox(r1, values=[f"COM{i}" for i in range(1, 17)], state="readonly", width=16)
         self.cbo_port.set(self.parent.sp_config.com_port)
         self.cbo_port.pack(side="left")
@@ -1262,7 +1266,7 @@ class PropertiesDialog(tk.Toplevel):
         # Baud Rate
         r2 = ttk.Frame(tab_port)
         r2.pack(fill="x", pady=4)
-        ttk.Label(r2, text="Baud Rate:", width=14, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r2, text="Baud Rate:", width=14, font=get_ui_font(9)).pack(side="left")
         self.cbo_speed = ttk.Combobox(r2, values=["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"], state="readonly", width=16)
         self.cbo_speed.set(str(self.parent.sp_config.baudrate))
         self.cbo_speed.pack(side="left")
@@ -1270,7 +1274,7 @@ class PropertiesDialog(tk.Toplevel):
         # Data Bits
         r3 = ttk.Frame(tab_port)
         r3.pack(fill="x", pady=4)
-        ttk.Label(r3, text="Data Bits:", width=14, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r3, text="Data Bits:", width=14, font=get_ui_font(9)).pack(side="left")
         self.cbo_bits = ttk.Combobox(r3, values=["5", "6", "7", "8"], state="readonly", width=16)
         self.cbo_bits.set("8")
         self.cbo_bits.pack(side="left")
@@ -1278,7 +1282,7 @@ class PropertiesDialog(tk.Toplevel):
         # Parity
         r4 = ttk.Frame(tab_port)
         r4.pack(fill="x", pady=4)
-        ttk.Label(r4, text="Parity:", width=14, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r4, text="Parity:", width=14, font=get_ui_font(9)).pack(side="left")
         self.cbo_parity = ttk.Combobox(r4, values=["None", "Even", "Odd", "Mark", "Space"], state="readonly", width=16)
         self.cbo_parity.set("None")
         self.cbo_parity.pack(side="left")
@@ -1286,7 +1290,7 @@ class PropertiesDialog(tk.Toplevel):
         # Stop Bits
         r5 = ttk.Frame(tab_port)
         r5.pack(fill="x", pady=4)
-        ttk.Label(r5, text="Stop Bits:", width=14, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r5, text="Stop Bits:", width=14, font=get_ui_font(9)).pack(side="left")
         self.cbo_stop = ttk.Combobox(r5, values=["1", "1.5", "2"], state="readonly", width=16)
         self.cbo_stop.set("1")
         self.cbo_stop.pack(side="left")
@@ -1306,7 +1310,7 @@ class PropertiesDialog(tk.Toplevel):
         ]:
             rf = ttk.Frame(tab_opt)
             rf.pack(fill="x", pady=3)
-            ttk.Label(rf, text=label_text, width=22, font=("Tahoma", 8)).pack(side="left")
+            ttk.Label(rf, text=label_text, width=22, font=get_ui_font(9)).pack(side="left")
             e = ttk.Entry(rf, width=14)
             e.insert(0, str(val))
             e.pack(side="left")
@@ -1372,7 +1376,7 @@ class GlueDialog(tk.Toplevel):
         # From
         r1 = ttk.Frame(top_f)
         r1.pack(fill="x", pady=4)
-        ttk.Label(r1, text="From, nm:", width=14, font=("Tahoma", 8, "bold")).pack(side="left")
+        ttk.Label(r1, text="From, nm:", width=14, font=get_ui_font(9, "bold")).pack(side="left")
         self.txt_from = ttk.Entry(r1, width=12)
         self.txt_from.insert(0, "650.0")
         self.txt_from.pack(side="left")
@@ -1380,7 +1384,7 @@ class GlueDialog(tk.Toplevel):
         # To
         r2 = ttk.Frame(top_f)
         r2.pack(fill="x", pady=4)
-        ttk.Label(r2, text="To, nm:", width=14, font=("Tahoma", 8, "bold")).pack(side="left")
+        ttk.Label(r2, text="To, nm:", width=14, font=get_ui_font(9, "bold")).pack(side="left")
         self.txt_to = ttk.Entry(r2, width=12)
         self.txt_to.insert(0, "750.0")
         self.txt_to.pack(side="left")
@@ -1388,7 +1392,7 @@ class GlueDialog(tk.Toplevel):
         # Overlap
         r3 = ttk.Frame(top_f)
         r3.pack(fill="x", pady=4)
-        ttk.Label(r3, text="Overlap, pxl:", width=14, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r3, text="Overlap, pxl:", width=14, font=get_ui_font(9)).pack(side="left")
         self.txt_overlap = ttk.Entry(r3, width=12)
         self.txt_overlap.insert(0, "50")
         self.txt_overlap.pack(side="left")
@@ -1396,7 +1400,7 @@ class GlueDialog(tk.Toplevel):
         # File Name
         r4 = ttk.Frame(top_f)
         r4.pack(fill="x", pady=4)
-        ttk.Label(r4, text="File Name:", width=14, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r4, text="File Name:", width=14, font=get_ui_font(9)).pack(side="left")
         self.txt_fname = ttk.Entry(r4, width=18)
         self.txt_fname.insert(0, "spectrum_stitched.dat")
         self.txt_fname.pack(side="left", fill="x", expand=True)
@@ -1404,7 +1408,7 @@ class GlueDialog(tk.Toplevel):
         self.progress = ttk.Progressbar(self, mode="determinate")
         self.progress.pack(fill="x", padx=10, pady=6)
 
-        self.lbl_status = ttk.Label(self, text="Ready to start multi-window scanning", font=("Tahoma", 8))
+        self.lbl_status = ttk.Label(self, text="Ready to start multi-window scanning", font=get_ui_font(9))
         self.lbl_status.pack(pady=2)
 
         btn_bar = ttk.Frame(self)
@@ -1476,19 +1480,19 @@ class RubyDialog(tk.Toplevel):
 
         r1 = ttk.Frame(f)
         r1.pack(fill="x", pady=4)
-        ttk.Label(r1, text="R1 Peak (nm):", width=16, font=("Tahoma", 8, "bold")).pack(side="left")
+        ttk.Label(r1, text="R1 Peak (nm):", width=16, font=get_ui_font(9, "bold")).pack(side="left")
         self.e_wl = ttk.Entry(r1, width=12)
         self.e_wl.insert(0, f"{self.parent.cursor_x:.3f}" if 680 <= self.parent.cursor_x <= 750 else "694.340")
         self.e_wl.pack(side="left")
 
         r2 = ttk.Frame(f)
         r2.pack(fill="x", pady=4)
-        ttk.Label(r2, text="Temperature (K):", width=16, font=("Tahoma", 8)).pack(side="left")
+        ttk.Label(r2, text="Temperature (K):", width=16, font=get_ui_font(9)).pack(side="left")
         self.e_temp = ttk.Entry(r2, width=12)
         self.e_temp.insert(0, f"{self.parent.ruby_temperature:.1f}")
         self.e_temp.pack(side="left")
 
-        self.lbl_res = ttk.Label(f, text="Pressure: 0.00 GPa", font=("Tahoma", 11, "bold"), foreground="#0000AA")
+        self.lbl_res = ttk.Label(f, text="Pressure: 0.00 GPa", font=get_ui_font(11, "bold"), foreground="#0000AA")
         self.lbl_res.pack(pady=12)
 
         ttk.Button(f, text="Calculate", command=self._calc).pack()

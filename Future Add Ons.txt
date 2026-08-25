@@ -89,4 +89,31 @@ Date: August 2026
 
 2. Automated Calibration & Measurement PDF Reports:
    - Feature: One-click export of publication-ready figures with acquisition metadata, temperature logs, and spectrometer calibration tables.
+
+--------------------------------------------------------------------------------
+ 5. PRINCETON INSTRUMENTS PIXIS CCD CAMERA INTEGRATION
+--------------------------------------------------------------------------------
+1. Dedicated Native PIXIS Driver (`spectro_suite/hardware/detectors/pixis.py`):
+   - Architecture: Implement `Camera` protocol (`PIXISCamera`, `MockPIXISCamera`) matching `base.py`.
+   - Interfacing Options:
+     * Primary: Native 64-bit PICam SDK (`Picam.dll` / `libpicam.so`) via ctypes or `pylablib.devices.PrincetonInstruments.PicamCamera`.
+     * Legacy COM: WinSpec/32 automation via `spectro_suite/hardware/detectors/winspec.py` for older workstation setups.
+     * Modern Automation: Princeton Instruments LightField COM/.NET automation bridge.
+
+2. 1D Full Vertical Binning (FVB) & Spectroscopy Acquisition:
+   - Feature: Hardware-level Full Vertical Binning (FVB) across sensor height (e.g. 1340x100, 1340x400, 1024x1024).
+   - Benefit: Maximizes signal-to-noise ratio and readout rates by summing columns directly on-chip before digitization.
+
+3. 2D Frame Streaming & Optical Alignment:
+   - Feature: Support `grab_2d_frame(color_mode="RGB"|"MONO")` for live beam positioning, focal spot inspection, and slit alignment in the 2D Camera View tab.
+
+4. Deep Thermoelectric Cooling & Temperature Lock Watchdog:
+   - Feature: Automated Peltier cooling setpoint control (target -70 °C to -90 °C) and real-time status monitoring (LOCKED / COOLING / FAULT).
+
+5. Sensor Geometry & Calibration Profiles:
+   - Presets: Add default configurations for common PIXIS formats in `profiles.py`:
+     * PIXIS 100/400/256 (1340 columns, 20.0 µm pixel pitch, central pixel 670.0).
+     * PIXIS 1024 (1024 columns, 13.0 µm pixel pitch, central pixel 512.0).
+     * PIXIS 2048 (2048 columns, 13.5 µm pixel pitch, central pixel 1024.0).
+   - Factory Registration: Map `"PIXIS"` and `"PICAM"` in `spectro_suite/hardware/factory.py` and `device_selector.py`.
 ================================================================================
