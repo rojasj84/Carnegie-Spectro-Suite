@@ -122,4 +122,33 @@ reads by trying the same address; temperature remains unsolved. Do not retry
   3. Live USB bus capture (Wireshark+USBPcap) remains the highest-confidence
      path for anything beyond incremental confirmed-pattern extrapolation --
      still worth doing whenever there's physical access to the machine.
+
+--------------------------------------------------------------------------------
+ 6. CHECKED AND CLOSED: EPICS drivers, and WinSpec32/ADRoper-style COM automation
+--------------------------------------------------------------------------------
+User asked whether the EPICS areaDetector ecosystem has a driver for this era
+of Princeton Instruments hardware. It does (ADPICam, ADLightField, ADPvCam,
+the now-archived ADRoper), but all of them sit at the same abstraction level
+already ruled out for Micro-Manager/Odemis: they wrap the closed-source PICam/
+PVCAM SDK, or (ADRoper, ADLightField) drive the vendor's own application via
+COM/CLR automation. None reimplement the raw wire protocol -- confirmed dead
+end for finding new register/command bytes, same reason as before (nobody who
+built these needed to solve the raw-protocol problem).
+
+ADRoper specifically raised a real question worth settling: could driving the
+*original* WinView32/WinSpec32 via COM automation sidestep raw-protocol RE
+entirely, the way it apparently does for whatever hardware ADRoper actually
+targets? Checked directly against this repo's own `Drivers/APAUSB.SYS` (the
+real legacy kernel driver from the vendor CD, already in this repo, target of
+the ruled-out Part 6 6-pipe call graph): its PE header reports
+`Machine = 0x14C (i386, 32-bit)`, built 2006-02-02, 25654 bytes. There is no
+64-bit build of it anywhere in this repo or in anything found from Princeton
+Instruments. A 32-bit kernel-mode driver cannot load into a 64-bit Windows
+kernel under any circumstance (unlike userspace EXEs, WOW64 does not apply to
+ring-0 code) -- this is an absolute architectural fact, not a signing-policy
+or compatibility-mode question. So even though WinSpec32.exe itself would
+likely launch fine as a 32-bit process under WOW64, it has no kernel driver to
+talk to on this machine. CLOSED: this path is dead for a structural reason,
+not worth revisiting without an actual 64-bit-signed legacy driver appearing
+from somewhere, which nothing so far suggests exists.
 ================================================================================
