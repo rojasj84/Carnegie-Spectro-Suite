@@ -1,0 +1,126 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 4)
+================================================================================
+Document: AI Instructions 4.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+This is a documentation-only follow-up to "AI Instructions 3.txt", written
+from further static analysis of ghidra_scripts/decompiled_piusbwdf.c -- NO
+live hardware was touched this session (the InGaAs detector is not currently
+cooled, so live acquisition testing was deliberately deferred). Read Part 3
+first; this corrects one thing in it and adds a significant new finding.
+
+--------------------------------------------------------------------------------
+ 1. CORRECTION TO PART 3: PID_A026 IS NOT "THE OTHER ST-133 REVISION"
+--------------------------------------------------------------------------------
+Part 3, Section 1, states IOCTL 0x5500600E "reports which of two supported
+hardware revisions (PID_A010 vs PID_A026) is attached -- both are legitimate,
+not a version mismatch." That undersold what the driver actually says.
+
+Tracing the device-identification code directly (piusbwdf.sys, the function
+at address 0x0001fbf0) shows the driver reads the USB device descriptor and
+does a literal string dispatch on Product ID:
+
+    if (ProductID == 0xA010) { ... DbgPrint("I am a ST133\n"); }
+    else if (ProductID == 0xA026) { ... DbgPrint("I am a PIXIS\n"); }
+    else { DbgPrint("I am UNKNOWN\n"); return error; }
+
+PID_A026 is not a revision of the ST-133 controller at all -- it identifies
+a PIXIS, a completely different Princeton Instruments product (a CCD imaging
+camera), which happens to share this same generic USB2 controller board and
+this same driver package. This machine's actual detector is a PID_A010
+ST-133. Do not "fix" the PID to 0xA026 again; that was tried once already
+this week, broke live device discovery, and was reverted -- this finding is
+now the concrete reason why: it would make the code identify as the wrong
+physical product.
+
+--------------------------------------------------------------------------------
+ 2. NEW FINDING: PIXEL DATA STREAMS VIA A CONTINUOUS EP0 READER, NOT ON-DEMAND
+--------------------------------------------------------------------------------
+This is a genuinely different acquisition model than anything assumed in
+Parts 1-3, and it changes what IOCTL_READ_FRAME (0x55002021) probably means.
+
+The same device-identification function (0x0001fbf0) sets a per-device type
+flag: 0 for ST-133, 1 for PIXIS (offset +0x40 / longlong-index +8 into the
+device context, used consistently everywhere else in the driver too). Later,
+UNCONDITIONALLY for both device types, it calls FUN_000113cc, which branches
+on that same flag:
+
+    if (type == 0)      -> DbgPrint("Configuring continuous reader for EP0\n");   // ST-133
+    else if (type == 1) -> DbgPrint("Configuring continuous reader for EP2\n");   // PIXIS
+    else return STATUS_OBJECT_NAME_INVALID;
+
+It then calls what is almost certainly WdfUsbTargetPipeConfigContinuousReader
+(a real, standard KMDF API) on that pipe, wiring in two callbacks:
+  - FUN_000114e4 as the completion routine
+  - FUN_0001169c as the failure routine -- and this one identifies ITSELF via
+    its own debug strings as EvtPixelReadFailure ("--> EvtPixelReadFailure()",
+    "Failed on Pipe %p with status 0x%08x", "USBD_STATUS = 0x%08x").
+
+FUN_000114e4 (the completion routine) is a textbook ring-buffer producer:
+copies each received chunk into a slot (memcpy into
+ctx+0x48 + index*itemSize + offset), tracks bytes-remaining-for-current-item,
+and once a full item has arrived: increments a frame counter, timestamps it
+(KeQueryPerformanceCounter), advances the ring index modulo the ring size,
+resets the remaining-bytes counter for the next item, and signals a kernel
+event (KeSetEvent) that something is waiting to consume it.
+
+CONCLUSION: for the ST-133, this driver is NOT waiting for a discrete
+"take a frame" request to go read EP0 -- it configures EP0 as a continuously-
+read pipe automatically at device arrival, and pixel-shaped data is expected
+to arrive on it on its own, whenever the hardware clocks it out. The role of
+IOCTL_READ_FRAME (0x55002021) is now believed to be the CONSUMER side of
+this ring buffer -- "give me the next completed item" -- not a request that
+itself causes an acquisition to happen. This reframes last session's
+observation that IOCTL_READ_FRAME gets accepted (STATUS_PENDING) but never
+completes: the ring-buffer infrastructure is real and running, but nothing
+is actually clocking data onto EP0 for it to collect, because the
+register-write / timing-program path that would arm the detector still has
+never been confirmed to reach the wire (see Part 3, Section 5).
+
+This does NOT change the current code's behavior (acquire_frame() already
+issues IOCTL_READ_FRAME through the safe overlapped-I/O helper and would
+receive whatever the ring buffer produces once real data starts flowing) --
+it changes where to look next if pixel data still doesn't show up once the
+detector is cooled and re-tested: the question is no longer "is
+IOCTL_READ_FRAME the right call" (it looks like it is), it's "what makes the
+hardware start clocking real samples onto EP0 at all."
+
+--------------------------------------------------------------------------------
+ 3. WHAT'S STILL UNRESOLVED (unchanged from Part 3, restated for continuity)
+--------------------------------------------------------------------------------
+1. Whether the register-write handshake (0x22/0x23/0x24/0x26 via VR 0xAF) or
+   the compiled timing-program buffer (FUN_10029160, PIXCM32.dll, not fully
+   traced) is what's actually needed to make the hardware start streaming --
+   neither has ever been observed to produce a response from the controller.
+2. Whether firmware is resident/correct on this specific unit at all --
+   DebugView was proposed in Part 3 to observe this directly and was never
+   done. Note: Part 4's Section 2 does NOT resolve the firmware question --
+   the continuous-reader setup happens regardless of firmware state, it just
+   configures the OS-side plumbing to receive data if/when the hardware ever
+   sends any.
+3. Temperature: still no VR has ever returned a real value. Given the new
+   ring-buffer model, it's now worth considering whether temperature (like
+   pixel data) might also arrive via a continuously-read pipe/event rather
+   than a direct request-response VR -- not yet checked.
+
+--------------------------------------------------------------------------------
+ 4. WHEN THE DETECTOR IS COOLED AND THIS PICKS BACK UP
+--------------------------------------------------------------------------------
+The user's stated intent (Aug 28) is to first "talk to it" and see whether
+more informative responses than outright hangs/timeouts can be gotten before
+pulling more live data -- i.e. continue the diagnostic, low-risk probing
+style from the Part 3 session (isolated calls through _ioctl_overlapped(),
+bounded timeouts, no synchronous calls that can hang a process) rather than
+jumping straight to a full acquire_frame() attempt. Good next low-risk
+checks once cooled:
+  - Confirm whether VR 0xF0/0xF1 still respond the same way (baseline sanity
+    check that nothing regressed).
+  - Try IOCTL_READ_FRAME again now that its role is better understood --
+    still expect STATUS_PENDING/no data unless the register-write question
+    above has also been resolved in the meantime.
+  - DebugView during a fresh replug, per Part 3 Section 7, remains the
+    single highest-value unresolved diagnostic step.
+================================================================================
