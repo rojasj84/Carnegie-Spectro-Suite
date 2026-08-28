@@ -337,7 +337,11 @@ class ST133Camera(BaseCamera):
             steps.append(("REG/0x26", self._write_register(0x26, 1)))
 
             # 6. Query Hardware Status / Presence (VR 0xF0, 0xF1)
-            steps.append(("F0", self._vendor_request_in(0xF0, length=1) is not None))
+            # NOTE: VR 0xF0 must be requested with length>=2 (was length=1) --
+            # live-confirmed 2026-08-28 that a 1-byte request STALLs the
+            # control endpoint (WinUsb_ControlTransfer -> ERROR_GEN_FAILURE),
+            # while length=8 (matching the module docstring) completes cleanly.
+            steps.append(("F0", self._vendor_request_in(0xF0, length=8) is not None))
             steps.append(("F1", self._vendor_request_in(0xF1, length=2) is not None))
 
             failed = [name for name, ok in steps if not ok]
@@ -353,29 +357,35 @@ class ST133Camera(BaseCamera):
 
     def _write_register(self, addr: int, value: int) -> bool:
         """
-        Write a controller register: bRequest=register address itself, wValue=the
-        16-bit value, with a dummy 2-byte data-stage payload (content ignored).
+        Write a controller register: bRequest=register address itself, wValue=
+        the 16-bit value, with NO data stage (zero-length control transfer).
 
         REVISED from an earlier "bRequest=0xAF fixed opcode, wValue=address,
         value-in-payload" theory after cross-referencing Princeton Instruments'
         own GPL-licensed Linux kernel driver for this exact hardware (rspiusb.c,
         VID_0BD7/PID_A010 "ST133", https://github.com/delmic/pvcam-pilk). Its
-        PIUSB_SETVNDCMD ioctl handler builds the SETUP packet as:
-            usb_control_msg(dev, sndctrlpipe(dev,0), ctrl.cmd,
-                             USB_DIR_OUT|USB_TYPE_VENDOR, controlData, 0,
-                             dummyCtlBuf, ctrl.numbytes, ...)
-        i.e. bRequest=ctrl.cmd, wValue=controlData (the actual 16-bit value being
-        set, taken from the caller's data bytes), and the OUT data stage is a
-        zeroed dummy buffer -- the value travels in wValue, not the payload. The
-        old 0xAF-prefix scheme was never ACKed by the real controller for 0x22/
-        0x23/0x24/0x26 register writes; treating the register address itself as
-        the vendor command byte (bRequest=addr, wValue=value) is the reading of
-        this evidence most consistent with both this driver and our own
-        piusbwdf.sys 8-byte header format, but it has NOT yet been tested live
-        (no hardware access at time of writing) -- next hardware session should
-        verify this before trusting it further.
+        PIUSB_SETVNDCMD ioctl handler builds the SETUP packet as bRequest=
+        ctrl.cmd, wValue=controlData (the 16-bit value), with a dummy data-stage
+        buffer of caller-chosen length -- confirming the value travels in
+        wValue, not the payload, but leaving the payload's own length/necessity
+        ambiguous (Linux userspace controls ctrl.numbytes; not visible in this
+        kernel driver).
+
+        LIVE-CONFIRMED on real hardware (2026-08-28, WinUSB, bRequest=0x22,
+        wValue=1): a 2-byte dummy OUT data stage (matching rspiusb.c's pattern
+        literally) times out -- WinUsb_ControlTransfer fails with
+        ERROR_SEMAPHORE_TIMEOUT (121), i.e. the device never completes that
+        data stage. A zero-length transfer (Length=0, no data stage at all)
+        instead completes immediately with GetLastError=0 -- a real ACK. So
+        unlike rspiusb.c's userspace caller, this firmware wants the SETUP
+        packet alone with no OUT phase. bRequest=addr/wValue=value is therefore
+        confirmed as the right field mapping; only the "send a dummy payload"
+        part of the original theory was wrong, and is dropped here.
+        NOTE: this confirms the IOCTL is ACKed by the transport, not that the
+        controller's internal register actually took the value -- there's no
+        independent register-read to verify against yet.
         """
-        return self._vendor_request_out(addr & 0xFF, w_value=value & 0xFFFF, data=bytes([0, 0]))
+        return self._vendor_request_out(addr & 0xFF, w_value=value & 0xFFFF, data=None)
 
     def _vendor_request_out(
         self,

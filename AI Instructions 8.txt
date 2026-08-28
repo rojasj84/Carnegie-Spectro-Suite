@@ -1,0 +1,119 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 8)
+================================================================================
+Document: AI Instructions 8.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+Same-day follow-up to Part 7. The detector is now fully cooled (was cooling
+during Part 7's research-only session) and the user was remote but had live
+CLI access to the machine, so the register-write fix proposed (but untested)
+in Part 7 was tested for real today. Result: **first successful full
+controller handshake in this project's history**, plus one more real bug
+found and fixed along the way. Read Part 7 first.
+
+--------------------------------------------------------------------------------
+ 1. HEADLINE RESULT: THE CONTROLLER HANDSHAKE NOW COMPLETES SUCCESSFULLY
+--------------------------------------------------------------------------------
+Ran `connect()` (which internally runs `_init_controller_handshake()`) against
+the real, live, fully-cooled hardware over WinUSB. Every single step ACKed:
+
+    INFO: ST-133 controller handshake & EPLD decoder armed successfully.
+
+That's register writes 0x22 (digitizer mode), 0x23 (packet size), 0x24
+(sub-address), 0x26 (EPLD arm), plus status queries VR 0xF0 and VR 0xF1 --
+ALL of them. Across every prior session (Parts 1-7), every register write
+attempt either failed outright or was accepted by the IOCTL layer without a
+real device ACK. This is the first time this handshake has ever fully
+succeeded. Getting here took two fixes, both live-confirmed today (Section 2).
+
+Caveat: an ACKed control transfer confirms the *transport* accepted the
+request cleanly -- it is not independent proof the controller's internal
+register state actually changed, since there's still no confirmed way to
+read a register back. Treat this as "the wire protocol is now right," not yet
+as "register 0x22 is definitely set to 1 in hardware."
+
+--------------------------------------------------------------------------------
+ 2. THE TWO FIXES, BOTH LIVE-CONFIRMED TODAY
+--------------------------------------------------------------------------------
+a) _write_register's data stage must be ZERO-LENGTH, not a dummy payload.
+
+   Part 7 corrected the field mapping to bRequest=register address, wValue=
+   value (from cross-referencing PI's own rspiusb.c Linux driver), but kept a
+   2-byte dummy OUT payload matching that driver's `dummyCtlBuf` pattern.
+   Isolated, direct WinUsb_ControlTransfer testing today showed that pattern
+   actually TIMES OUT on this hardware:
+
+     bRequest=0x22, wValue=1, Length=2 (dummy payload)  -> ERROR_SEMAPHORE_TIMEOUT (121)
+     bRequest=0x22, wValue=1, Length=0 (no data stage)  -> SUCCESS, GetLastError=0
+
+   So unlike whatever PIXIS/rspiusb.c-era firmware expected, this ST-133
+   firmware wants the bare SETUP packet with no OUT data phase at all for
+   register writes. `_write_register` now passes `data=None` accordingly. The
+   bRequest=addr/wValue=value mapping itself is confirmed correct by this
+   result (a real, clean ACK) -- only the "send some dummy bytes" detail from
+   rspiusb.c didn't transfer over.
+
+b) VR 0xF0 needs length>=2 (was requested as length=1), or it STALLs.
+
+   Found while isolating (a) -- a leftover inconsistency where the top-of-file
+   module docstring already said "VR 0xF0 (8-byte IN)" but
+   `_init_controller_handshake` actually requested only 1 byte. Live-isolated
+   test: length=1 gets ERROR_GEN_FAILURE (31, a real STALL), length=8
+   completes cleanly and returns the same 2 bytes as VR 0xF1 (`b'\x00\x01'`,
+   i.e. firmware version 1.0 -- interesting that 0xF0 and 0xF1 return
+   identical bytes here; not yet explained, but both are real ACKed reads).
+   Handshake now requests length=8 for VR 0xF0, matching the module docstring.
+
+Both fixes are in st133_usb.py; full 6-test suite still passes standalone.
+
+--------------------------------------------------------------------------------
+ 3. A DEBUGGING TRAP WORTH FLAGGING: THE KMDF FALLBACK MASKS WINUSB ERRORS
+--------------------------------------------------------------------------------
+`_vendor_request_out`/`_vendor_request_in` try WinUSB first, and on failure
+silently fall through to a KMDF `DeviceIoControl` attempt against the same
+handle. When the device is actually bound to WinUSB (as it was for all of
+today's testing), that KMDF fallback call is guaranteed to fail too --
+`IOCTL_VENDOR_REQUEST_OUT`/`_IN` are piusbwdf.sys-specific codes meaningless
+to a WinUSB-bound file handle -- and its failure (consistently
+`ERROR_INVALID_FUNCTION`, 1) overwrites `GetLastError()`, hiding whatever the
+original WinUSB failure actually was. This cost real debugging time today:
+the first read on `_write_register` reported GetLastError=1 and looked like a
+generic rejection, when the real, more informative error (121, a data-stage
+timeout) was from the WinUSB call and got clobbered by the fallback attempt
+right after. Not fixed (functionally harmless -- the end result is still
+correctly `False` either way) -- just noted here so a future debugging
+session isolates a single transport layer directly (as done here) instead of
+trusting `GetLastError()` after a call through the combined helper.
+
+--------------------------------------------------------------------------------
+ 4. TEMPERATURE STILL NOT READING (unrelated, unsurprising, not a regression)
+--------------------------------------------------------------------------------
+`get_temperature()` still returns None/OFFLINE with the detector fully
+cooled. This calls VR 0x8B (`VR_READ_TEMP`), which Part 6 already flagged as
+very likely the wrong command byte (0x46 was found to be the real register
+in PIXCM32.dll's temperature-read code path, though the packet framing built
+around it there belongs to the ruled-out legacy 6-pipe architecture -- see
+Part 6 Sec 2-3). Today's fixes only touched the register-WRITE path; nothing
+here suggests 0x8B is right or wrong on its own, it's just still unconfirmed.
+Worth trying 0x46 as a bRequest directly (bRequest=0x46, wValue=0, IN read),
+matching today's now-confirmed "register address as bRequest" pattern, next
+time hardware is available -- this was not tried today (out of the scope the
+user selected: register-write retest + temperature retest via the *existing*
+0x8B path, not new register guesses).
+
+--------------------------------------------------------------------------------
+ 5. NEXT STEPS
+--------------------------------------------------------------------------------
+  1. Try VR 0x46 (bRequest=0x46, IN direction) for temperature, using the same
+     "address as bRequest" pattern now confirmed for writes -- cheap, no new
+     protocol theory needed, just applying today's confirmed pattern to reads.
+  2. The two items explicitly deferred today by user choice: the never-tested
+     "set frame dimensions" IOCTL (0x5500A019) and an actual IOCTL_READ_FRAME
+     attempt -- both now more reasonable to attempt with the detector cooled
+     and the handshake finally succeeding first.
+  3. Live USB bus capture (Wireshark+USBPcap) remains the highest-confidence
+     path for anything beyond incremental confirmed-pattern extrapolation --
+     still worth doing whenever there's physical access to the machine.
+================================================================================
