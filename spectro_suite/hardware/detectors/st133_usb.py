@@ -298,12 +298,18 @@ class ST133Camera(BaseCamera):
           5. Arm EPLD Command Decoder (register 0x26 = 1).
           6. Query Hardware Status / Presence (VR 0xF0, 0xF1).
 
-        Registers 0x22/0x23/0x24/0x26 are NOT EP0 vendor requests -- decompiling
-        FUN_1000d08b showed they're written as 6-byte packets
-        ([0x01, addrLo, addrHi, 0x02, valLo, valHi]) over the bulk OUT pipe via
-        USBDRVD_PipeWriteTimeout, not via USBDRVD_VendorOrClassRequestOut. VR 0xF0
-        (1 byte) / 0xF1 (2 bytes) as EP0 IN reads are confirmed by direct call-site
-        matches elsewhere in the same DLL.
+        NOTE: an earlier version of this docstring claimed registers 0x22/0x23/
+        0x24/0x26 were written as 6-byte packets over the bulk OUT pipe (from
+        decompiling FUN_1000d08b in the legacy Pipp32.dll/USBDRVD.dll stack).
+        That entire call graph was later confirmed to be a dead end for this
+        hardware (see AI Instructions 6.txt Sec. 3 -- it targets a 6-pipe USB
+        topology this 3-pipe device does not have) and does not apply here.
+        _write_register sends these as real EP0 vendor control requests via
+        piusbwdf.sys's IOCTL_VENDOR_REQUEST_OUT, which is independently
+        cross-validated by Princeton Instruments' own GPL Linux driver for this
+        exact hardware (rspiusb.c, see _write_register docstring) -- vendor
+        commands are plain USB control transfers, never bulk-pipe framed. VR
+        0xF0 (1 byte) / 0xF1 (2 bytes) as EP0 IN reads are confirmed live.
         """
         if not self._device_handle or not kernel32:
             return False
@@ -347,19 +353,29 @@ class ST133Camera(BaseCamera):
 
     def _write_register(self, addr: int, value: int) -> bool:
         """
-        Write a controller register: bRequest=0xAF (fixed "write register" command),
-        wValue=register address, with the 2-byte value carried as payload data.
-        This exact call shape was tested live against real hardware through the
-        installed piusbwdf.sys driver -- the IOCTL is accepted with the correct
-        8-byte header / METHOD_IN_DIRECT framing (an earlier bulk-pipe-packet
-        theory, based on the older Pipp32.dll/USBDRVD.dll stack, does not apply to
-        this driver and was superseded once piusbwdf.sys was decompiled directly).
-        NOTE: acceptance by the IOCTL layer is confirmed; the controller actually
-        ACKing a register write over the wire is not -- 0x22 ("digitizer mode")
-        was issued this way live and never completed, consistent with everything
-        else observed past pure-identification requests (see module docstring).
+        Write a controller register: bRequest=register address itself, wValue=the
+        16-bit value, with a dummy 2-byte data-stage payload (content ignored).
+
+        REVISED from an earlier "bRequest=0xAF fixed opcode, wValue=address,
+        value-in-payload" theory after cross-referencing Princeton Instruments'
+        own GPL-licensed Linux kernel driver for this exact hardware (rspiusb.c,
+        VID_0BD7/PID_A010 "ST133", https://github.com/delmic/pvcam-pilk). Its
+        PIUSB_SETVNDCMD ioctl handler builds the SETUP packet as:
+            usb_control_msg(dev, sndctrlpipe(dev,0), ctrl.cmd,
+                             USB_DIR_OUT|USB_TYPE_VENDOR, controlData, 0,
+                             dummyCtlBuf, ctrl.numbytes, ...)
+        i.e. bRequest=ctrl.cmd, wValue=controlData (the actual 16-bit value being
+        set, taken from the caller's data bytes), and the OUT data stage is a
+        zeroed dummy buffer -- the value travels in wValue, not the payload. The
+        old 0xAF-prefix scheme was never ACKed by the real controller for 0x22/
+        0x23/0x24/0x26 register writes; treating the register address itself as
+        the vendor command byte (bRequest=addr, wValue=value) is the reading of
+        this evidence most consistent with both this driver and our own
+        piusbwdf.sys 8-byte header format, but it has NOT yet been tested live
+        (no hardware access at time of writing) -- next hardware session should
+        verify this before trusting it further.
         """
-        return self._vendor_request_out(0xAF, w_value=addr, data=bytes([value & 0xFF, (value >> 8) & 0xFF]))
+        return self._vendor_request_out(addr & 0xFF, w_value=value & 0xFFFF, data=bytes([0, 0]))
 
     def _vendor_request_out(
         self,

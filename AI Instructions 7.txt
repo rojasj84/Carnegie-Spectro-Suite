@@ -1,0 +1,171 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 7)
+================================================================================
+Document: AI Instructions 7.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+This is a research-only session (user was away from the hardware). No live
+testing was performed. Read Parts 3-6 first for background -- Part 6 in
+particular closed out the legacy 6-pipe Pipp32/PISCC32/PIDC32 decompilation as
+a dead end and proposed two forward paths: live USB capture, and inspecting
+open-source client code written for the real 3-pipe-era hardware. This part
+covers a major hit on the second path.
+
+--------------------------------------------------------------------------------
+ 1. FOUND: PRINCETON INSTRUMENTS' OWN GPL LINUX DRIVER FOR THIS EXACT HARDWARE
+--------------------------------------------------------------------------------
+Located and downloaded the real source of `rspiusb.c`/`rspiusb.h` -- a Linux
+kernel driver Princeton Instruments themselves wrote and released under GPLv2
+(originally submitted to LKML in 2008, later staged in-kernel 2.6.29-2.6.31,
+now preserved at https://github.com/delmic/pvcam-pilk/blob/master/usb/rspiusb.c
+-- Delmic B.V. maintains it as a dependency of their open-source microscopy
+suite, Odemis). This is not a reconstruction or a guess -- it's PI's own code,
+copyright "Princeton Instruments 2005, 2006", targeting:
+
+    #define APA_VID     0x0BD7
+    #define ST133_PID   0xA010
+    #define PIXIS_PID   0xA026
+
+This is a byte-for-byte match with our own confirmed hardware IDs and the
+ST133-vs-PIXIS distinction independently found in piusbwdf.sys (Part 4). Full
+source saved locally at (scratchpad, not committed -- re-fetch if needed):
+  https://raw.githubusercontent.com/delmic/pvcam-pilk/master/usb/rspiusb.c
+  https://raw.githubusercontent.com/delmic/pvcam-pilk/master/usb/rspiusb.h
+
+--------------------------------------------------------------------------------
+ 2. WHAT IT PROVES: VENDOR COMMANDS ARE EP0 CONTROL TRANSFERS, PERIOD
+--------------------------------------------------------------------------------
+rspiusb.c exposes two vendor-command ioctls, PIUSB_GETVNDCMD / PIUSB_SETVNDCMD,
+whose handlers are trivial passthroughs to the Linux USB core's standard
+control-transfer primitive:
+
+    // GETVNDCMD (read)
+    usb_control_msg(pdx->udev, usb_rcvctrlpipe(pdx->udev, 0),
+        ctrl.cmd, USB_DIR_IN, 0, 0, &devRB, ctrl.numbytes, HZ*10);
+
+    // SETVNDCMD (write)
+    controlData = (ctrl.pData[1] << 8) | ctrl.pData[0];
+    usb_control_msg(pdx->udev, usb_sndctrlpipe(pdx->udev, 0),
+        ctrl.cmd, (USB_DIR_OUT | USB_TYPE_VENDOR),
+        controlData, 0, dummyCtlBuf, ctrl.numbytes, HZ*10);
+
+This independently confirms, from PI's own code, what we'd already derived by
+decompiling piusbwdf.sys: the real protocol is plain USB control transfers on
+EP0 (bRequest/wValue/wIndex + optional data stage), never the bulk-pipe-framed
+"[0x81, opcode, 0xFF]"-style packets the legacy 6-pipe Pipp32.dll/PISCC32.dll
+call graph and our own live discriminator testing explored in Part 6. That
+whole line of bulk-framing experimentation is now doubly dead: architecturally
+wrong (6-pipe vs 3-pipe, Part 6) AND wrong at the transport-choice level
+(control transfers, not bulk framing) per PI's own driver for the very PID
+we have.
+
+Also confirms live-tested facts we already had: FW version query is command
+0xF1 (`if (ctrl.cmd == 0xF1) dbg("FW Version returned...")`), matching our own
+already-confirmed VR 0xF1 response.
+
+--------------------------------------------------------------------------------
+ 3. THE FIELD-MAPPING CORRECTION: VALUE GOES IN wValue, NOT THE PAYLOAD
+--------------------------------------------------------------------------------
+This is the actionable finding. Our prior `_write_register(addr, value)`
+implementation (st133_usb.py) assumed a generic "write register" bRequest
+(0xAF, guessed) with the register ADDRESS in wValue and the VALUE carried as
+the OUT data-stage payload. Looking at SETVNDCMD above: the 16-bit value being
+set (`controlData`, built from the caller's first two data bytes) is passed as
+**wValue in the SETUP packet itself**, and the actual OUT data stage sent to
+the device is `dummyCtlBuf` -- a zeroed, content-irrelevant buffer. The value
+travels in the SETUP packet, not the payload.
+
+The reading of this most consistent with both rspiusb.c and our own
+independently-confirmed piusbwdf.sys 8-byte header format (Part 3:
+[bRequest, 0,0,0, wValueLo, wValueHi, 0,0]) is that **the register address
+itself IS the bRequest byte** for these commands, not a separate argument --
+i.e. bRequest=addr, wValue=value, with a dummy data stage. There is no generic
+"0xAF write register" opcode; each register has its own vendor-command number,
+and that number is the register address.
+
+Applied this correction in st133_usb.py:
+
+    def _write_register(self, addr: int, value: int) -> bool:
+        return self._vendor_request_out(addr & 0xFF, w_value=value & 0xFFFF, data=bytes([0, 0]))
+
+(previously: `self._vendor_request_out(0xAF, w_value=addr, data=bytes([value&0xFF,(value>>8)&0xFF]))`)
+
+This plausibly explains why the OLD scheme's live register writes for 0x22
+("digitizer mode"), 0x23, 0x24, 0x26 were IOCTL-accepted but never actually
+ACKed by the controller (Part 3/6) -- bRequest=0xAF may simply not be a command
+the firmware recognizes at all. Also cleaned up a stale docstring in
+`_init_controller_handshake` that still described the old, since-abandoned
+6-pipe bulk-packet theory for these same register writes -- it directly
+contradicted the code (which has used EP0 vendor requests since Part 3) and
+is now corrected to point at this evidence instead.
+
+**IMPORTANT: this fix is NOT live-tested.** No hardware access this session.
+Next time hardware is available, re-run the 0x22/0x23/0x24/0x26 handshake
+writes with this new bRequest=addr/wValue=value shape and check for real ACKs
+(not just IOCTL acceptance) before trusting it further. Full test suite (6
+tests) still passes standalone/no-hardware.
+
+--------------------------------------------------------------------------------
+ 4. ALSO CONFIRMED: ST133 READPIPE ENDPOINT SEMANTICS (cross-validates our own testing)
+--------------------------------------------------------------------------------
+rspiusb.c's PIUSB_READPIPE handler, ST133 branch:
+
+    case 0: // ST133 Pixel Data -> get_pixel_data() (async bulk-in ring buffer read)
+    case 1: // ST133 IO        -> piusb_read_io() (plain synchronous bulk READ)
+    default: -EINVAL
+
+`piusb_read_io()` does a plain `usb_bulk_msg()` READ on `hEP[1]` -- it does NOT
+write anything to the command pipe first (a `copy_from_user` into the read
+buffer right before the read is dead code, flagged by a later kernel
+maintainer's own "why reading this data? left-over from piusb_write_bulk()?"
+comment in the source). This means the actual write to the command pipe (our
+0x08) must happen as a *separate*, prior PIUSB_WRITEPIPE call -- exactly the
+"write to 0x08, then read from 0x86" pattern we tested live in Part 6. That
+pattern's *architecture* (write-then-read on separate bulk pipes) is now
+independently confirmed correct by PI's own driver; only the *content* of what
+libpvcam actually writes remains unknown (see Section 5).
+
+hEP[] is populated positionally by probe() in descriptor order (index = the
+Nth endpoint listed in the interface descriptor, filtered to bulk only) --
+consistent with our own live `WinUsb_QueryPipe` enumeration order [0x82 IN,
+0x86 IN, 0x08 OUT] mapping to hEP[0]=0x82 (pixel), hEP[1]=0x86 (IO/status),
+hEP[2]=0x08 (command out, used by WRITEPIPE, not reachable via READPIPE's
+switch table).
+
+--------------------------------------------------------------------------------
+ 5. WHAT'S STILL MISSING (this driver is generic passthrough, not the protocol)
+--------------------------------------------------------------------------------
+rspiusb.c is deliberately dumb -- PIUSB_GETVNDCMD/SETVNDCMD/READPIPE/WRITEPIPE
+just forward whatever `cmd`/`pData` bytes userspace (libpvcam) hands them onto
+the wire. The actual mapping of "read temperature" / "start acquisition" /
+"set exposure" to specific vendor-command bytes and register addresses lives
+in libpvcam itself (closed-source), NOT in this kernel driver. Checked whether
+delmic/pvcam-pilk or Delmic's own Odemis (github.com/delmic/odemis,
+src/odemis/driver/pvcam.py) might fill that gap -- they don't: Odemis's
+pvcam.py is a ctypes wrapper around the same closed-source PVCAM shared
+library (libpvcam.so on Linux), calling its high-level API (pl_get_param,
+pl_exp_start_seq, etc.) exactly the way our own PICam research already ruled
+out on Windows (Part 6, Sec re: PICam SDK) -- same abstraction level, still no
+raw register bytes. Confirmed dead end for register-content discovery, though
+the wire-FORMAT findings above (Sections 2-4) came from the kernel driver
+layer, which is untouched by this limitation.
+
+--------------------------------------------------------------------------------
+ 6. STATUS / NEXT STEPS (unchanged priority order from Part 6)
+--------------------------------------------------------------------------------
+  1. Live USB bus capture (Wireshark+USBPcap against WinSpec 32-bit, or
+     Micro-Manager with a working PI adapter, or LightField eval) remains the
+     single highest-confidence path to real register-content ground truth --
+     still blocked on physical presence at the machine.
+  2. Micro-Manager's mmCoreAndDevices repo has NO ST-133/OMA-V-specific device
+     adapter and no PIUSB-specific adapter either (checked DeviceAdapters/
+     listing directly) -- only a generic PVCAM adapter, which (like Odemis)
+     wraps the same closed-source library. This path is exhausted; nothing
+     further to gain from Micro-Manager source specifically.
+  3. When hardware is next available: re-test the corrected `_write_register`
+     (Section 3) FIRST, before anything else -- it's a concrete, cheap,
+     evidence-backed correction that doesn't require guessing new bytes, just
+     re-running the exact same handshake sequence already in the code.
+================================================================================
