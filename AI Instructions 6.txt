@@ -1,0 +1,164 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 6)
+================================================================================
+Document: AI Instructions 6.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+This documents a live bulk-pipe testing session (detector was cooling; only
+passive/low-risk reads and short writes were sent, nothing that arms an
+exposure) plus the deep-dive into the legacy Pipp32.dll/PISCC32.dll/PIDC32.dll
+call graph it led to. Bottom line up front: that legacy call graph is a DEAD
+END for this specific hardware -- it targets a 6-pipe USB topology that this
+device does not have. Two concrete, higher-ROI paths forward are identified
+in Section 5. Read Parts 3-5 first for background.
+
+--------------------------------------------------------------------------------
+ 1. WHAT WAS TESTED LIVE, AND THE KEY DISCRIMINATOR RESULT
+--------------------------------------------------------------------------------
+With the device back on generic WinUSB (same zadig.exe/ST133_WinUSB.inf swap
+used before), a series of writes to bulk OUT 0x08 with reads on bulk IN 0x86
+were tried:
+
+  - Passive listen (no writes at all), 0x86 and 0x82: silence, 0/2, confirming
+    nothing streams unsolicited.
+  - Bare single byte [0x8B]: no response.
+  - Minimal SCC-flavored frame [0x81, 0x8B, 0xFF] (3 bytes): got a real 2-byte
+    reply on 0x86: "00 00". First-ever non-identification response from this
+    controller.
+  - Follow-up sweep varying the middle byte (0xAA, 0x00, 0x55, 0xFF, and the
+    real temperature register 0x46 in proper 8-byte framing -- see Section 2)
+    all produced the SAME intermittent pattern: sometimes "00 00", sometimes
+    a timeout, for IDENTICAL repeated input, with no correlation to which
+    byte value was sent. Known-good registers (0xF0, 0xF1, confirmed
+    responsive via EP0 control transfers) got NOTHING via this bulk framing.
+  - DEFINITIVE DISCRIMINATOR: a 15-second pure-silence listen on 0x86 with
+    ZERO writes sent produced 0/15 responses -- completely dead. This rules
+    out "0x86 has unrelated background chatter." Responses only ever occur
+    after a write to 0x08.
+
+CONCLUSION: 0x08 -> 0x86 is a real, live transport pair (the bridge chip
+genuinely reacts to writes), but "00 00" is a generic transport-level
+packet-received acknowledgement, not decoded register data. Varying the
+opcode/register byte never changed the response or made it more/less
+reliable. The bridge ACKs framing, but nothing downstream is dispatching the
+payload as a real command.
+
+--------------------------------------------------------------------------------
+ 2. THE REAL TEMPERATURE REGISTER: 0x46, NOT 0x8B -- AND WHY IT DOESN'T HELP YET
+--------------------------------------------------------------------------------
+Traced PICM_Get_Temperature's actual vtable target for the ST-133 class
+(FUN_10058ab2, PIXCM32.dll) and its hardware-polling sibling (FUN_10058ac8,
+called when a "poll hardware" flag is set): it reads 10 raw ADC bytes via
+FUN_1000a56b -> FUN_1000a671(handle, 0x46) -> PIPP_Input(handle, 0x46), then
+averages them and applies a real linear calibration (raw * slope + offset)
+with rounding. This is genuine, confirmed hardware-temperature-read code.
+
+0x8B (used throughout the ORIGINAL pre-this-investigation code, i.e. before
+any of this multi-session RE effort) never appears anywhere in this real
+temperature path. It's very likely just wrong -- possibly confused with a
+raw USB vendor-request bRequest byte from an unrelated numbering scheme.
+0x46 is the real register address, confirmed from the actual temperature-
+reading code, not guessed.
+
+HOWEVER: reconstructing PIPP_Input(handle, 0x46)'s exact wire bytes for the
+PIFX2/USB class (FUN_1000e94b, Pipp32.dll) gives an 8-byte packet
+[0x01, 0x00, 0x46, 0x00, 0x03, 0x00, 0x00, 0x00] sent on PIPE INDEX 5, with
+the reply read from PIPE INDEX 4 -- and that's the problem (see Section 3).
+This packet WAS tried live on the real hardware's 0x08/0x86 pipes and
+produced the exact same inconclusive "00 00" pattern as random bytes (see
+Section 1) -- consistent with the packet meaning nothing to this hardware's
+firmware, not confirmation that 0x46 works.
+
+--------------------------------------------------------------------------------
+ 3. WHY THIS IS A HARD ARCHITECTURAL DEAD END (not just an unlucky guess)
+--------------------------------------------------------------------------------
+Traced three more "session init / unlock" candidates through Pipp32.dll,
+specifically looking for an explicit gateway-unlock step before register
+reads/writes should work:
+
+  - PIPP_Reset_Interface's real target for the USB/PIFX2 class (FUN_1000e70b)
+    is a bare no-op: `return 1;`. Nothing happens.
+  - PIPP_Initialize's real target (FUN_1000e3bd) opens ALL 6 PIPES (indices
+    0,1,2,3,4,5) via USBDRVD_PipeOpen, and -- only if streaming parameters
+    are already configured -- spawns a background thread. That thread
+    (FUN_1000fb8c) turns out to be a passive, double-buffered overlapped
+    bulk-read loop (reads pipe index 2), functionally equivalent to what
+    piusbwdf.sys's own continuous-EP0-reader already does automatically on
+    the real hardware (see Part 5). It does not transmit anything.
+  - No explicit "wake up" / "unlock the SCC gateway" vendor-request or
+    packet write exists anywhere in this call path. If one exists at all,
+    it isn't in Pipp32.dll's PIFX2 class.
+  - Went one level further into PIDC32.dll (a separate "Data Collect"
+    subsystem, initialized alongside Pipp32.dll -- _PIDC_Initialize,
+    _PIDC_Create_datacollect_object) and PIXCM32.dll's real
+    PICM_Set_interface_type target (FUN_1001433f). That function's switch
+    statement explicitly accepts interface-type values 6 and 10 as valid in
+    its outer guard, but has NO case arm for either -- meaning those two
+    specific values silently do nothing and fall through to failure. Never
+    confirmed which numeric type ID this scheme actually uses for the
+    ST-133 (a different field, +0x6e24, was previously mistaken for it --
+    it's a separate sub-type flag, not the interface-type value FUN_1001433f
+    consumes at +0x6e40).
+
+The deeper, structural reason to stop here: PIPP_Initialize opens pipe
+indices 0-5 (SIX pipes) via USBDRVD_PipeOpen, and FUN_1000e94b's temperature-
+read packet targets pipe indices 4 and 5 specifically. This entire code path
+-- PIDC32.dll, Pipp32.dll's PIFX2 class, PISCC32.dll's SCC_Output/SCC_Input
+-- was built for the OLDER USBDRVD.dll/APAUSB.sys-era Cypress FX (non-LP),
+6-endpoint interface descriptor. The physical hardware today, confirmed
+multiple independent ways (live WinUsb_QueryPipe enumeration, DebugView's own
+"Number of USB Pipes = 3" log line), exposes exactly 3 bulk pipes. Pipe
+indices 4 and 5 do not exist on this device. No amount of further
+decompiling this specific DLL family will produce a wire format this
+hardware's actual firmware understands, because that DLL family was never
+built to talk to this firmware generation in the first place. Princeton
+Instruments' later High-Speed USB 2.0 (FX2LP, 3-pipe) ST-133 revision was
+served by different, newer software that was never part of this repo's
+decompiled set.
+
+--------------------------------------------------------------------------------
+ 4. WHAT'S STILL SOLID (unaffected by the above -- do not re-litigate these)
+--------------------------------------------------------------------------------
+  - piusbwdf.sys's own IOCTL surface (0x55002005/0x5500200A/0x55002021/etc.,
+    documented in Part 3) is real and independently confirmed live: VR 0xF0/
+    0xF1 return genuine data through it, and IOCTL_READ_FRAME's async/pended
+    behavior and its ring-buffer relationship to the continuous EP0 reader
+    (Part 4/5) are confirmed by direct code inspection of THIS driver, not
+    the legacy one. st133_usb.py's IOCTL layer, rewritten to match this, is
+    correct and safe (bounded, no more unkillable hangs) regardless of the
+    dead end above.
+  - The frame-size math is exactly right: 512 pixels x 2 bytes/pixel = 1024
+    bytes, matches the observed <60000-count 16-bit ADC ceiling, and matches
+    IOCTL_GET_USB_PID/IOCTL_GET_DRIVER_INFO's confirmed-live behavior.
+  - 0x46 as the real temperature register address is still the best-evidenced
+    number available, even though the legacy 8-byte packet framing built
+    around it doesn't apply to this hardware. If/when a working 3-pipe
+    protocol is found (Section 5), 0x46 is the register to target first.
+
+--------------------------------------------------------------------------------
+ 5. THE TWO HIGH-ROI PATHS FORWARD (pivoting away from further 6-pipe RE)
+--------------------------------------------------------------------------------
+1. LIVE USB BUS CAPTURE -- the fastest path to real ground truth.
+   Install a known-working acquisition tool that actually talks to a 3-pipe
+   ST-133 successfully (WinSpec 32-bit v2.5.25+, Micro-Manager with a
+   Princeton Instruments/PVCAM adapter, or an eval install of LightField),
+   run it against this same hardware, and capture the USB traffic with
+   Wireshark + USBPcap (or a hardware USB analyzer) while clicking
+   "Acquire" or checking temperature once. A single successful capture
+   shows the exact bytes sent to 0x08/EP0 and read from 0x86/0x82 directly
+   -- ground truth, no more decompiling needed for the wire format itself.
+
+2. INSPECT NEWER, OPEN-SOURCE 3-PIPE-ERA CLIENT CODE.
+   Micro-Manager's open-source repository has device adapters for Princeton
+   Instruments USB controllers (mmgr_dal_PVCAM and/or older PIUSB wrapper
+   adapters) that are known to work against modern (3-pipe, PID_0xA010-class)
+   hardware. Reading their initialization sequence is a much shorter path to
+   a working protocol than continuing to decompile 1990s-era closed-source
+   DLLs built for different silicon.
+
+Both of these sidestep the actual blocker identified in Section 3: this
+repo's decompiled DLL set (PIDC32/PIPP32/PISCC32/contrman/PIXCM32) documents
+a real, working protocol -- just for hardware this specific unit is not.
+================================================================================
