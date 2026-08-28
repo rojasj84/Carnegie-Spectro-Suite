@@ -151,4 +151,54 @@ likely launch fine as a 32-bit process under WOW64, it has no kernel driver to
 talk to on this machine. CLOSED: this path is dead for a structural reason,
 not worth revisiting without an actual 64-bit-signed legacy driver appearing
 from somewhere, which nothing so far suggests exists.
+
+--------------------------------------------------------------------------------
+ 7. FURTHER INCREMENTAL TESTING (same day): driver-rebind blocker, more reads closed out
+--------------------------------------------------------------------------------
+Attempted to continue toward the deferred "set frame dimensions" IOCTL
+(0x5500A019) and an actual IOCTL_READ_FRAME attempt. Decompiled the exact
+input/output buffer shape first (METHOD_IN_DIRECT, confirmed from the IOCTL
+code's own low bits): a 4-byte value in the regular input buffer (likely
+num_frames), and the OUTPUT buffer's *length* (not content, it's Direct I/O)
+becomes the per-frame byte size later multiplied for IOCTL_READ_FRAME sizing.
+
+BLOCKED before testing: both of these are piusbwdf.sys-specific IOCTLs, and
+the device is currently bound to winusb.inf (confirmed via
+`pnputil /enum-devices /connected /ids`), not piusbwdf.sys -- they will not
+work through a WinUSB handle at all (same ERROR_INVALID_FUNCTION failure mode
+documented in Sec. 3). The driver files are still fully present on this
+machine (C:\Windows\System32\drivers\piusbwdf.sys,
+C:\Windows\System32\DriverStore\FileRepository\piusb3.inf_amd64_...,
+original source at C:\Program Files\Princeton Instruments\PICam\Drivers\
+PIUSB3\), so rebinding is possible in principle, but the only reliable
+CLI-only way to force it without devcon.exe (confirmed not present) is
+`pnputil /remove-device` + rescan on the live instance -- and that exact
+operation previously left this device needing a physical power cycle to
+recover (Part 5). User chose to skip the rebind rather than risk that while
+remote. Deferred until physical access is available.
+
+Continued instead with more read-only WinUSB testing (no rebind needed):
+
+  - Re-tested VR 0x8A/0x8B/0xA8/0xAE/0xAF (all previously "unresponsive" in
+    sessions before the handshake ever succeeded) at several lengths (2-16
+    bytes), now AFTER a successful handshake, in case the controller's
+    internal state matters. All 15 attempts failed identically
+    (ERROR_SEMAPHORE_TIMEOUT, 121) while a 0xF1 sanity check in the same run
+    still succeeded cleanly. Clean, consistent negative -- not flakiness, a
+    real "not recognized" result. These leads are closed for reads,
+    handshake state doesn't change the outcome.
+  - Tried reading back the SAME register addresses just confirmed working for
+    writes (0x22/0x23/0x24/0x26) as IN requests, with wValue=0 and also
+    wValue=0xFFFF (a guessed "query" sentinel). All failed the same way.
+    CONCLUSION: this firmware's read and write command namespaces are
+    disjoint -- "register address as bRequest" only confirmed for writes.
+    0xF0/0xF1 look like a small, fixed identification/status pair, not a
+    general-purpose register-read mechanism. No register read-back method is
+    known yet, so writes are still only confirmed "ACKed by the transport,"
+    not confirmed to have actually changed controller state.
+
+Net effect: today's WinUSB-only testing budget is now spent productively but
+is genuinely exhausted without either a driver rebind (physical access) or a
+new, non-guessing source of evidence (Wireshark capture). Both remain the
+right next moves, in that order of preference once physically at the machine.
 ================================================================================
