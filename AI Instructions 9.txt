@@ -1,0 +1,149 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 9)
+================================================================================
+Document: AI Instructions 9.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+Same-day continuation of Part 8. User rebound the device from winusb.inf back
+to piusbwdf.sys (via Device Manager, per Part 8 Sec. 7's deferred plan), which
+succeeded -- but a follow-up KMDF register-write test then wedged the device
+in a way that survived every software-level recovery attempt. Session ended
+with the device left in this state; **read Section 1 FIRST before touching
+this hardware again.**
+
+--------------------------------------------------------------------------------
+ 1. REQUIRED FIRST STEP NEXT SESSION: PHYSICAL POWER CYCLE
+--------------------------------------------------------------------------------
+The ST-133 USB controller (or at minimum this session's stuck kernel-mode I/O
+state) needs a full physical unplug/replug of the USB cable before any further
+testing. Two Python processes were left running with threads permanently
+blocked in an uncancellable kernel-mode wait (PIDs 27180 and 30860 in this
+session -- irrelevant by next session, but the SYMPTOM to recognize is
+described in Sec. 2). Neither `Stop-Process -Force`, nor Task Manager's "End
+Task" (which fails with "Access denied" -- NOT an actual permissions issue,
+see Sec. 3), nor a full Device Manager disable/re-enable cycle cleared it. A
+disable/re-enable DID successfully rebuild the device stack (pnputil reported
+"Started" afterward) but a fresh process's very next plain READ-ONLY request
+(VR 0xF0) also hung -- strongly suggesting the driver's I/O queue is
+serialized and the original stuck request, never actually cleaned up, sits at
+the front of it blocking everything else. Only a physical power cycle reaches
+deep enough (USB host-controller-level port teardown) to clear this. Do this
+BEFORE attempting to reconnect at all next session.
+
+--------------------------------------------------------------------------------
+ 2. THE DRIVER REBIND ITSELF WORKED -- DOCUMENT THIS FOR REUSE
+--------------------------------------------------------------------------------
+Before the hang, the rebind from winusb.inf to piusbwdf.sys succeeded cleanly
+via Device Manager: "Update driver > Browse my computer > Let me pick from a
+list" > selected the Princeton Instruments entry (backed by
+C:\Program Files\Princeton Instruments\PICam\Drivers\PIUSB3\piusb3.inf,
+already staged in the driver store). Confirmed via:
+    pnputil /enum-devices /connected /ids
+  showing: Device Description "PI MTE USB Camera", Class Name "PI_USB",
+  Class GUID {7b4b6729-58e7-4e50-a7d4-cdeafec229c1}, Driver Name "oem152.inf",
+  Manufacturer Name "PI Software", Status "Started".
+
+st133_usb.py's `_find_device_path()` still resolved correctly post-rebind, via
+the generic `{a5dcbf10-6530-11d2-901f-00c04fb951ed}` GUID (this is the
+standard Windows GUID_DEVINTERFACE_USB_DEVICE, exposed by the USB bus stack
+itself regardless of which function driver -- winusb.sys or piusbwdf.sys -- is
+bound above it; not WinUSB-specific despite living in a variable/comment
+mentioning "WinUSB"). `WinUsb_Initialize` correctly now FAILS (confirming
+we're genuinely off WinUSB), while the raw `CreateFileW` handle still opens
+fine and can issue our custom IOCTLs. This full rebind procedure (GUI steps +
+verification command) is worth reusing directly next time -- no changes
+needed to the method itself, just repeat it after the physical power cycle.
+
+Immediately after rebind, F0/F1 (VR reads) worked correctly through the KMDF
+path -- only the register WRITES (0x22/0x23/0x24/0x26, using the zero-length
+data stage confirmed correct over WinUSB in Part 8) failed to ACK. This is
+the first sign of the problem investigated in Sec. 3.
+
+--------------------------------------------------------------------------------
+ 3. ROOT CAUSE OF THE HANG: A REAL PROTOCOL FACT COMBINED WITH A DRIVER GAP
+--------------------------------------------------------------------------------
+Register writes with a zero-length output buffer are correct over WinUSB
+(Part 8 Sec. 2a) but get rejected immediately and cleanly by the KMDF IOCTL
+(`IOCTL_VENDOR_REQUEST_OUT`, METHOD_IN_DIRECT) with ERROR_INSUFFICIENT_BUFFER
+(122) -- this specific IOCTL apparently requires a real (non-null) output
+buffer to accept the request at all, unlike the raw WinUSB control transfer.
+
+Testing whether a small non-zero output buffer (2 bytes) would satisfy this
+KMDF requirement is what triggered the hang. The likely mechanism, working
+backward from evidence gathered THIS SAME SESSION:
+
+  - Direct WinUsb_ControlTransfer testing (Part 8 Sec. 2a) already proved
+    this firmware never completes a register-write control transfer that has
+    ANY data stage attached -- only a bare, zero-length SETUP-only transfer
+    ever gets ACKed. WinUSB's own pipe-policy timeout (2000ms, configured by
+    this driver) is what let those attempts fail cleanly instead of hanging.
+  - piusbwdf.sys's own handling of IOCTL_VENDOR_REQUEST_OUT, submitted with a
+    non-zero output buffer, almost certainly hits this SAME never-acknowledged
+    condition at the wire level -- but the KMDF driver does not appear to
+    apply an equivalent timeout of its own to the underlying USB transfer
+    submission, so the request (and the IRP, and our DeviceIoControl call)
+    simply waits forever for a device response that will never arrive.
+  - Our own `_ioctl_overlapped()` safety net (CancelIoEx after a 3s bounded
+    wait) is designed exactly for this scenario and has worked cleanly for
+    every other IOCTL tested to date, including IOCTL_READ_FRAME's
+    cancellation (explicitly confirmed clean in Part 3/4). This time,
+    cancellation itself did not complete -- indicating piusbwdf.sys's
+    vendor-request-OUT code path likely does not correctly propagate
+    IRP cancellation down through the USB stack once the transfer has
+    already been submitted to hardware and is waiting on a response. This
+    reads as a genuine gap/bug in this specific driver code path, not
+    something fixable by changing how we call it from user mode.
+
+CONSEQUENCE: because the blocking wait is inside kernel-mode I/O with no
+working cancellation path, ordinary process termination cannot reach it.
+`Stop-Process -Force` from PowerShell silently failed to kill the process
+(confirmed: same PID, same near-zero CPU time, still alive afterward). Task
+Manager's "End Task" failed with "Access denied" -- this is NOT a real
+permissions/elevation problem; it is Windows refusing to tear down a process
+with a thread genuinely stuck inside an uncancellable kernel-mode wait,
+surfaced through the GUI as an access error. Confirmed independently via two
+different tools (PowerShell and Task Manager), same underlying cause both
+times.
+
+The Device Manager disable/re-enable cycle DID rebuild the device's PnP stack
+cleanly (pnputil reported "Started" with a fresh instance afterward), but a
+BRAND NEW process's very next plain read-only request (VR 0xF0, no writes at
+all) also hung. The most likely explanation: piusbwdf.sys dispatches I/O
+through a serialized (single-request-at-a-time) queue, and the original
+stuck request -- never actually completed or cancelled, just orphaned along
+with its unkillable owning thread -- is still occupying the front of that
+queue, blocking every subsequent request behind it regardless of which
+process or handle it comes from. A device-level disable/re-enable rebuilds
+the PDO/FDO objects but evidently doesn't reach whatever this particular
+stuck IRP is still attached to.
+
+--------------------------------------------------------------------------------
+ 4. RULES FOR NEXT SESSION (do not re-trigger this)
+--------------------------------------------------------------------------------
+  1. Physical power cycle FIRST (Sec. 1), before any reconnection attempt.
+  2. Do NOT call IOCTL_VENDOR_REQUEST_OUT over the KMDF path with a non-zero
+     output buffer for a register write. This is now a KNOWN way to wedge the
+     device with no software recovery. If register writes need to work over
+     KMDF specifically (vs. WinUSB, where the zero-length form is already
+     confirmed working -- Part 8), that needs a fundamentally different
+     approach, not more buffer-size guessing on this same call shape.
+  3. Given the WinUSB path already has a fully working, live-confirmed
+     register-write mechanism (Part 8), and KMDF-specific testing is what
+     caused today's incident, the KMDF path is not obviously worth pursuing
+     further for register writes specifically. It IS still needed for
+     IOCTL_READ_FRAME and IOCTL_SET_FRAME_DIMENSIONS (WinUSB-incompatible,
+     the original reason for today's rebind) -- those use different IOCTL
+     codes than the one that hung today and were never actually reached this
+     session. Worth trying those specifically next, once physically
+     power-cycled, while continuing to avoid re-testing buffer sizes on
+     IOCTL_VENDOR_REQUEST_OUT.
+  4. If ANY future IOCTL test shows signs of taking longer than its bounded
+     timeout (check via `Get-Process -Name python | Select CPU` -- a stuck
+     kernel wait shows near-zero, unchanging CPU time, unlike a busy/looping
+     process), stop issuing new test processes immediately rather than
+     retrying or spawning more -- each new stuck process just adds to the
+     cleanup burden and, as seen today, a serialized driver queue means new
+     requests can wedge behind an old stuck one even if they're unrelated.
+================================================================================
