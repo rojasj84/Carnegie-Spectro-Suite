@@ -97,18 +97,24 @@ in PIXCM32.dll's temperature-read code path, though the packet framing built
 around it there belongs to the ruled-out legacy 6-pipe architecture -- see
 Part 6 Sec 2-3). Today's fixes only touched the register-WRITE path; nothing
 here suggests 0x8B is right or wrong on its own, it's just still unconfirmed.
-Worth trying 0x46 as a bRequest directly (bRequest=0x46, wValue=0, IN read),
-matching today's now-confirmed "register address as bRequest" pattern, next
-time hardware is available -- this was not tried today (out of the scope the
-user selected: register-write retest + temperature retest via the *existing*
-0x8B path, not new register guesses).
+UPDATE (same day, follow-up): tried bRequest=0x46 directly (IN direction,
+wValue=0) at lengths 2/4/8/10/16 -- every single one timed out
+(ERROR_SEMAPHORE_TIMEOUT, 121), while a 0xF1 sanity re-check in the same run
+still succeeded cleanly, confirming the pipe itself is healthy and this is a
+genuine per-command result, not a flaky connection. So 0x46 does NOT work as
+a bare, unframed vendor command read -- in hindsight unsurprising, since 0x46
+was derived from the already-ruled-out 6-pipe SCC-framed-packet protocol
+(Part 6), not from any evidence it works standalone. The "register address as
+bRequest" pattern confirmed for WRITES today does not simply carry over to
+reads by trying the same address; temperature remains unsolved. Do not retry
+0x46 without new evidence -- it's a closed lead now, not an open one.
 
 --------------------------------------------------------------------------------
  5. NEXT STEPS
 --------------------------------------------------------------------------------
-  1. Try VR 0x46 (bRequest=0x46, IN direction) for temperature, using the same
-     "address as bRequest" pattern now confirmed for writes -- cheap, no new
-     protocol theory needed, just applying today's confirmed pattern to reads.
+  1. [DONE, negative -- see Sec. 4 update] VR 0x46 direct read: ruled out.
+     Temperature still needs either a genuinely new register/command-byte
+     hypothesis (not more address-guessing) or the Wireshark capture below.
   2. The two items explicitly deferred today by user choice: the never-tested
      "set frame dimensions" IOCTL (0x5500A019) and an actual IOCTL_READ_FRAME
      attempt -- both now more reasonable to attempt with the detector cooled
