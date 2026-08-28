@@ -1,0 +1,100 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 5)
+================================================================================
+Document: AI Instructions 5.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+This documents a live DebugView capture that settles the biggest open
+question from Parts 3-4. No hardware was armed/triggered this session
+(detector was cooling; only read-only diagnostics were run). Read Parts 3-4
+first for context.
+
+--------------------------------------------------------------------------------
+ 1. HOW THE CAPTURE WAS TAKEN (remote-friendly, no physical cable access)
+--------------------------------------------------------------------------------
+The user was working remotely and could not physically unplug/replug the USB
+cable. A software-only device restart worked as a substitute and produced a
+full driver log:
+
+  1. Sysinternals DebugView (portable, no install -- just run the exe),
+     dbgview64.exe, run as Administrator. Capture > Capture Kernel enabled.
+  2. Device restarted via (run from an ELEVATED PowerShell/cmd window):
+       pnputil /restart-device "USB\VID_0BD7&PID_A010\5&1487294B&0&5"
+     Note: Disable-PnpDevice / Enable-PnpDevice (the PowerShell cmdlets)
+     FAILED with "Generic failure" (HRESULT 0x80041001) when run
+     non-elevated -- if trying this path again, either run PowerShell as
+     Administrator first, or just use pnputil /restart-device directly, which
+     worked cleanly on the first attempt.
+  3. Log saved via DebugView's File > Save As to a .log file and read directly
+     -- far more reliable than trying to transcribe/screenshot a live capture
+     window.
+
+--------------------------------------------------------------------------------
+ 2. THE CAPTURE: CONFIRMED, LIVE (not just inferred from static analysis)
+--------------------------------------------------------------------------------
+Of ~1392 captured lines, 1381 were unrelated NVMe SSD power-state management
+noise (STORMINI / StorNVMe messages -- ignore these, they're the system disk,
+not the detector). The complete set of piusbwdf.sys log lines from the
+restart, in order:
+
+    Stopping EP0(2)
+    <--OsrFxEvtDeviceD0Exit
+    NumReaders set to 3
+    PIUSBEvtDeviceAdd()
+    Number of USB Pipes = 3
+    IsDeviceHighSpeed: TRUE
+    VendorID=0x0BD7
+    ProductID=0xA010
+    I am a ST133
+    Configuring continuous reader for EP0
+
+And then NOTHING further. No CheckFirmwareAndUpgrade, no "Vendor Cmd Read",
+no "Need to Upgrade the firmware" / "Not Upgrading the Firmware", no
+"Putting FX2 in RESET", no ReadEPLDVersions -- none of the firmware-upgrade-
+path debug strings identified by static analysis in Part 3/4 appear anywhere
+in the capture.
+
+CONFIRMED (not just theorized from the binary): the firmware-upgrade routine
+genuinely never runs for this device. This is not a silent failure inside
+that routine -- the routine is never entered at all, because the call to it
+is gated behind the PIXIS device-type branch, and the log shows this device
+correctly and cleanly taking the ST-133 branch straight past it.
+
+Also newly confirmed, minor: the actual WDF callback is named
+PIUSBEvtDeviceAdd() (we'd only ever referred to it by its FUN_ address,
+0x0001fbf0, before). "NumReaders set to 3" is new information not previously
+noted -- worth keeping in mind if continuous-reader behavior is investigated
+further (3 readers, only one of which -- EP0 -- has been traced so far).
+
+--------------------------------------------------------------------------------
+ 3. WHAT THIS CHANGES
+--------------------------------------------------------------------------------
+This closes the "maybe firmware upload silently failed" branch of
+investigation from Part 3 Section 7 -- there is nothing to debug there, the
+upload was simply never attempted, by design, in this driver, for this
+device type. Two live possibilities remain open (unchanged from Part 4
+Section 1, but now on firmer footing since the "maybe it failed" alternative
+is ruled out):
+
+  a. The ST-133 controller has its own onboard firmware source (EEPROM /
+     resident microcontroller firmware) that this driver correctly assumes
+     is already present and doesn't need a software push. If true, firmware
+     is NOT the reason register writes / temperature / frame data don't
+     respond -- something else is.
+  b. This driver, while functional enough to identify the device, enumerate
+     its pipes, and configure the continuous EP0 reader, is simply not the
+     complete driver for full ST-133 operation -- i.e. whatever component
+     would normally arm/trigger the detector and make it clock real data
+     onto EP0 lives elsewhere (a different driver version, a user-mode
+     helper DLL that talks to this one via the vendor-request IOCTLs, etc.)
+     and just isn't present/wired up on this machine.
+
+Neither has been distinguished yet. Next diagnostic step, still unresolved
+from Part 3: capture DebugView output around an ACTUAL register-write or
+frame-read attempt (not just a device restart) to see whether the driver
+logs anything informative when those calls are made -- this was not done
+this session (deliberately; the detector was cooling and the user wanted to
+avoid arming/triggering it before then).
+================================================================================
