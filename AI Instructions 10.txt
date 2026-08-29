@@ -1,0 +1,243 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 10)
+================================================================================
+Document: AI Instructions 10.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+THIS IS THE BREAKTHROUGH SESSION. After 9 prior parts of decompilation,
+guessing, and careful negative-result documentation, this session obtained a
+live Wireshark/USBPcap capture of the real 32-bit WinSpec32 software talking
+to this exact hardware unit, extracted the real wire protocol from it, and
+successfully replayed it through this driver -- producing the first-ever real
+temperature register read AND the first-ever real 512-pixel CCD/InGaAs
+spectrum read in this project's history. Read this part first; it supersedes
+the EP0-vendor-request-centric protocol theory built up across Parts 3-9.
+
+--------------------------------------------------------------------------------
+ 1. HOW WE GOT HERE: THE CAPTURE
+--------------------------------------------------------------------------------
+User was physically at the office with access to the original 32-bit WinSpec
+computer, which still runs the real, working legacy software stack against
+this exact hardware. Installed Wireshark 3.6.24 (the last release with 32-bit
+Windows support -- current Wireshark dropped it after 3.6.x; official archive:
+wireshark.org/download/win32/all-versions/) with the bundled USBPcap option,
+captured on all 3 USBPcap root-hub interfaces simultaneously (didn't need to
+identify the right one in advance), then did a cold restart: closed WinSpec,
+started the capture, relaunched WinSpec, reconnected, and ran one spectrum
+acquisition. Saved as USB Capture/USBCapture.pcapng (now committed to the
+repo, 2.58MB, 35181 total packets across all 3 interfaces).
+
+Analysis was done on the 64-bit dev machine using Python + scapy's
+RawPcapNgReader (tshark/pyshark not installed; scapy installed via pip and
+was sufficient) plus a hand-rolled parser for USBPcap's per-packet header
+format (USBPCAP_BUFFER_HEADER, 27-byte base: u16 headerLen, u64 irpId, u32
+status, u16 function, u8 info [bit0: completion vs request], u16 bus, u16
+device, u8 endpoint, u8 transfer [0=isoch,1=interrupt,2=control,3=bulk], u32
+dataLength). Target device identified unambiguously as bus=3/device=1 by its
+endpoint set matching our own already-confirmed pipe topology exactly:
+[0x00, 0x08, 0x80, 0x82, 0x86].
+
+--------------------------------------------------------------------------------
+ 2. THE HEADLINE FINDING: THE REAL PROTOCOL IS BULK-FRAMED, NOT EP0
+--------------------------------------------------------------------------------
+Packet-type breakdown for the target device: 30 CONTROL packets (all standard
+enumeration -- GET_DESCRIPTOR, SET_CONFIGURATION -- plus exactly 2 real
+URB_FUNCTION_VENDOR_DEVICE requests, bRequest=0xF2, never decoded further,
+apparently a rare/one-off command) versus 31818 BULK packets. The real,
+working protocol WinSpec32 uses for this hardware is overwhelmingly bulk-pipe
+framed commands -- not the EP0 vendor control request scheme that Parts 3-9
+built up from decompiling piusbwdf.sys and cross-referencing Princeton
+Instruments' own rspiusb.c Linux driver. That EP0 work was real and accurate
+for what it documented (piusbwdf.sys's actual IOCTL surface, the real field
+mapping for vendor writes) -- it just turned out to describe a command
+surface this hardware barely uses in practice. The dominant, actually-used
+protocol is bulk-pipe framed, much closer in spirit to the legacy SCC-framed-
+packet theory from the Pipp32.dll/PISCC32.dll 6-pipe architecture (Part 6) --
+just with the CORRECT 3-pipe topology and different exact framing bytes.
+
+Frame shape, confirmed directly from thousands of repeating examples in the
+capture, sent to bulk OUT endpoint 0x08 (fixed 6 bytes):
+    [0x01, addr, 0x00, cmd, data_lo, data_hi]
+  cmd=0x03 ("read-trigger"): controller replies with 2 bytes on bulk IN 0x86.
+  cmd=0x02 ("write"): data_lo/data_hi carries the 16-bit value; no reply seen.
+Longer bulk-OUT writes (78, 15, 18 bytes etc., seen during connect/init) are
+sequences of repeated [0x02, value, 0x00]-style triples -- batched writes,
+not yet individually decoded, likely calibration/init tables.
+
+USBPcap's "info" direction bit means REQUEST (going down to the device) vs
+COMPLETION (coming back up), NOT physical wire direction -- e.g. an
+endpoint-0x86 "REQUEST" with 0 bytes is the host arming a read on that
+(physically IN) pipe; its paired "COMPLETION" carries the actual data. This
+matters for anyone re-reading the raw capture directly.
+
+--------------------------------------------------------------------------------
+ 3. IDENTIFIED REGISTERS (from mapping every addr byte's read/write behavior)
+--------------------------------------------------------------------------------
+Walked the entire capture, grouping every 6-byte command by its addr byte and
+correlating cmd=0x03 reads with their paired 0x86 response, and cmd=0x02
+writes with their value:
+
+  addr=0x40 (READ): toggles between EXACTLY two values, 0x5555 / 0xD5D5,
+    across 103 samples. Classic bit-pattern self-test/echo value. Confirmed
+    live through this driver too -- reads consistently return one of these
+    two values. Used as REG_SELFTEST, a liveness check (see Sec. 5).
+
+  addr=0x46 (READ): stable, tightly-dithering between 0x9191 and 0x9292
+    (176 samples) -- exactly the profile of a real physical sensor reading
+    with ~1 LSB of noise, not a fixed code or toggling status bit. THIS IS
+    THE SAME REGISTER independently identified via static analysis in an
+    earlier session (PIXCM32.dll's real temperature-read code path,
+    PIPP_Input(handle, 0x46) -- see git history / earlier AI Instructions
+    parts) -- now confirmed by two fully independent methods. Live-replayed
+    through this driver: returns 0x9292 (37522) and 0x9191 (37265),
+    MATCHING the captured session almost exactly. Used as REG_TEMPERATURE.
+    Calibration to actual Celsius is NOT yet known -- see Sec. 6.
+
+  addr=0x42 (READ): constant 0x8787 (34695) across 24 samples, never
+    changes. Likely a fixed identification/status code, not a live sensor.
+    Not used by this driver.
+
+  addr=0x30, 0x88 (READ): always 0. Simple status flags, unused.
+
+  addr=0xE2 (READ): always 0 across 400 samples, polled in a tight loop
+    repeatedly right before the pixel-data readout in the capture. Read
+    interpretation: a "busy"/"not ready" flag, though the transition to
+    "ready" was never actually captured (see Sec. 4) -- it always read 0 in
+    every sample we have. Used as REG_ACQ_BUSY.
+
+  addr=0xE0 (READ): appears once, value 0, immediately before the trigger
+    write in the captured lead-up sequence. Used as REG_ACQ_PRETRIGGER.
+
+  addr=0x32 (READ): appears once, value 0, immediately after the trigger
+    write. Used as REG_ACQ_POSTTRIGGER.
+
+  addr=0x14 (WRITE, value=1): the ONLY state-changing write observed between
+    the busy-poll loop and the pixel data arriving on 0x82 in the captured
+    lead-up sequence. Best-evidenced acquisition trigger. Used as
+    REG_ACQ_TRIGGER. LIVE-CONFIRMED WORKING (Sec. 4) -- replaying exactly
+    this write, in this position in the sequence, produces a real frame.
+
+  addr=0x22 (WRITE): values seen were 0 and 126 -- NOT the value=1 this
+    driver's old speculative handshake used. addr=0x24 (WRITE): constant
+    value 1 -- NOT the value=0 the old handshake used. Neither addr=0x23 nor
+    addr=0x26 appear as simple 6-byte writes in the capture at all (the old
+    handshake's guessed values for these were wrong, and possibly the whole
+    approach of writing them individually was wrong -- they may only appear
+    inside the longer batched-triple sequences, not decoded yet).
+
+  addr=0x4A, 0x54 (READ, heavily used: ~1000+ samples each, high write
+    volume too on 0x4A with small values 0/8/12/13/14/15): NOT reliably
+    decoded -- the extraction script's "look ahead up to 5 events for the
+    paired response" logic likely cross-attributes responses between these
+    two closely-spaced channels when they're issued back-to-back. Their
+    first-5-samples were suspiciously identical between the two channels,
+    which is almost certainly a pairing bug, not real device behavior.
+    TREAT THESE TWO CHANNELS' DECODED VALUES AS UNRELIABLE until re-extracted
+    with strict adjacent-only pairing. Likely part of the acquisition state
+    machine given the write pattern (small sequential-looking values), but
+    not confirmed.
+
+--------------------------------------------------------------------------------
+ 4. LIVE REPLAY: FIRST-EVER REAL TEMPERATURE AND CCD DATA
+--------------------------------------------------------------------------------
+Built _bulk_read_register(addr) / _bulk_write_register(addr, value) /
+_bulk_read_frame(expected_bytes) helpers using WinUsb_WritePipe/ReadPipe
+directly (requires WinUSB binding -- piusbwdf.sys has no general bulk-pipe
+IOCTL, confirmed in Part 3, so none of this works while KMDF-bound). Tested
+live against the real hardware (device had been power-cycled per Part 9's
+required first step, then rebound to WinUSB via Device Manager):
+
+  - addr=0x40 (self-test): returned 0xD5D5 consistently across 3 reads --
+    exact match to the captured pattern. Confirms the protocol
+    implementation itself is correct, not just coincidentally plausible.
+  - addr=0x46 (temperature): returned 0x9292/0x9191 alternating across 5
+    reads -- exact match to captured values.
+  - Acquisition sequence replay (poll 0xE2 x3, read 0xE0 once, WRITE 0x14=1,
+    read 0x32 once) followed by a read on bulk IN 0x82: returned a FULL
+    1024-byte frame. Decoded as 512 uint16 values: min=0, max=65535 (one
+    saturated/hot pixel, consistent between runs), mean ~2000, baseline
+    noise floor ~500-1000 counts -- structurally identical to the real
+    spectrum extracted directly from the capture file itself (also 512
+    values, same baseline range, same kind of outlier).
+
+This was then wired into the actual driver class (not just a scratch script)
+and re-verified end-to-end through ST133Camera.connect() /
+.get_temperature() / .acquire_frame() directly -- same results, confirming
+the production code path (not just an ad-hoc test) works.
+
+NOTE ON NO EXPLICIT "ARM" FOR 0x82: no request needs to be issued on 0x82
+itself before reading -- this matches piusbwdf.sys's own continuous-reader
+architecture (Parts 4/5): the pipe is always being listened to in the
+background, and a frame simply arrives once the trigger sequence has fired.
+WinUSB's WinUsb_ReadPipe just blocks (up to its pipe-policy timeout) until
+that happens.
+
+--------------------------------------------------------------------------------
+ 5. WHAT CHANGED IN st133_usb.py
+--------------------------------------------------------------------------------
+  - REMOVED (superseded, never got a real ACK from the controller across many
+    sessions): _build_ingaas_timing_stream, _arm_gate_and_trigger, the old
+    _init_controller_handshake body (EP0 writes to 0x22/0x23/0x24/0x26), and
+    the now-dead VR_EPLD_CONFIG/VR_TRIGGER_ACQ/VR_READ_TEMP constants.
+  - ADDED: BULK_CMD_READ/BULK_CMD_WRITE, REG_SELFTEST/REG_TEMPERATURE/
+    REG_ACQ_BUSY/REG_ACQ_PRETRIGGER/REG_ACQ_TRIGGER/REG_ACQ_POSTTRIGGER,
+    _bulk_read_register/_bulk_write_register/_bulk_read_frame,
+    _trigger_acquisition (replays the captured sequence exactly).
+  - _init_controller_handshake is now a lightweight, non-blocking self-test
+    read (addr=0x40) -- purely informational, does not gate connect()'s
+    success. Proven unnecessary: acquire_frame()/get_temperature() work with
+    zero handshake beforehand.
+  - acquire_frame() now requires WinUSB (logs a clear warning and returns
+    zeros if still KMDF-bound) and uses _trigger_acquisition() +
+    _bulk_read_frame() instead of the old EP0-trigger-then-IOCTL_READ_FRAME
+    path. The old piusbwdf.sys IOCTL_READ_FRAME fallback was dropped: even
+    though that IOCTL can read frames, there's no confirmed way to ARM/
+    TRIGGER an acquisition through piusbwdf.sys at all (no bulk-write IOCTL
+    exists there), so the fallback path could never have worked end-to-end.
+  - get_temperature() now reads addr=0x46 via the bulk protocol. Deliberately
+    does NOT fabricate a Celsius conversion -- temperature_c is left None
+    (uncalibrated) and the real raw register value is returned in a new
+    raw_register field instead. See Sec. 6 for how to actually calibrate it.
+  - Old EP0-based infrastructure (_vendor_request_out/in, _ioctl_overlapped,
+    IOCTL_VENDOR_REQUEST_OUT/IN, _write_register, firmware bootstrap code)
+    is kept, unchanged, as real-but-no-longer-primary infrastructure -- still
+    accurate for what it documents, just not part of the main data path now.
+  - test_st133.py updated: removed the two tests exercising the deleted
+    timing-stream function, added tests for the new bulk register constants
+    and for safe no-WinUSB-handle behavior. Full suite (7 tests) passes.
+  - USB Capture/USBCapture.pcapng committed to the repo as a permanent
+    reference artifact -- re-analyze it directly for anything not yet
+    decoded (see Sec. 3's unreliable-pairing note, and Sec. 6 below).
+
+--------------------------------------------------------------------------------
+ 6. WHAT'S STILL NOT KNOWN -- NEXT STEPS
+--------------------------------------------------------------------------------
+  1. Temperature calibration (raw register -> Celsius). The raw reading is
+     confirmed real and live; the conversion is not. To calibrate: read
+     addr=0x46 through this driver at the same moment WinSpec32 displays its
+     own temperature reading on the capture machine, and solve for slope/
+     offset from two or more such paired samples (ideally at different
+     temperatures, e.g. while cooling down).
+  2. Exposure time is not wired to hardware at all yet -- no register
+     controlling integration time has been identified anywhere in the
+     capture. acquire_frame()'s exposure_time_sec currently only paces the
+     local progress callback; real exposure duration is whatever the
+     controller does internally by default. Worth doing a NEW, targeted
+     capture with two acquisitions at deliberately different exposure
+     settings in WinSpec32 to isolate which write (if any) changes.
+  3. addr=0x4A/0x54 need re-extraction with strict (not "look ahead up to 5")
+     pairing logic before trusting any conclusions about them -- likely part
+     of the acquisition state machine given the write pattern, not confirmed.
+  4. The two batched-write sequences (78/15/18-byte triples-of-[0x02,val,00])
+     seen during connect/init are not decoded at all yet -- likely
+     calibration or geometry setup, worth another pass through the capture.
+  5. The two real EP0 URB_FUNCTION_VENDOR_DEVICE requests (bRequest=0xF2,
+     OUT direction) were never decoded -- rare enough (2 in the whole
+     capture) that they're probably not on the critical path, but worth a
+     quick look if anything is still not working correctly.
+  6. The 98KB and ~1.5KB bulk-OUT transfers seen early in the capture (2 and
+     7 instances respectively) look like firmware/calibration table uploads
+     during connect -- not yet examined at all.
+================================================================================
