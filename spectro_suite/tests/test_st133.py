@@ -16,6 +16,8 @@ from spectro_suite.hardware.detectors.st133_usb import (
     REG_SELFTEST,
     REG_TEMPERATURE,
     REG_ACQ_TRIGGER,
+    TEMP_REG_COLD_REFERENCE,
+    TEMP_REG_COLD_TOLERANCE,
 )
 
 
@@ -79,6 +81,12 @@ class TestST133Driver(unittest.TestCase):
         self.assertIsNone(temp_info["temperature_c"])
         self.assertEqual(temp_info["status_str"], "OFFLINE")
         self.assertEqual(temp_info["status"], 0)
+        self.assertIsNone(temp_info["is_near_cold_reference"])
+
+    def test_cold_reference_matches_captured_dither_average(self):
+        """Cold reference must be the average of the two live-confirmed dithered raw values (0x9191/0x9292)."""
+        self.assertEqual(TEMP_REG_COLD_REFERENCE, (0x9191 + 0x9292) // 2)
+        self.assertGreater(TEMP_REG_COLD_TOLERANCE, 257)  # must exceed the observed dither noise floor
 
     def test_detector_info_and_1024_support(self):
         """Verify detector info reporting and 1024-pixel timing generation."""

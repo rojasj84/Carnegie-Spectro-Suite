@@ -510,10 +510,16 @@ class VBFormApp(tk.Tk):
                         txt = f"Detector Temp: {t_val:.1f} °C" + (f" [{st_str}]" if st_str else "")
                         fg = "#008800" if stat_code == 2 else ("#CC6600" if stat_code == 1 else "#CC0000")
                     elif raw_val is not None:
-                        # Real, connected register read -- just not calibrated to Celsius yet.
-                        # Show the raw value honestly rather than a fabricated temperature.
-                        txt = f"Detector Temp: reg=0x{raw_val:04X} (uncalibrated)"
-                        fg = "#CC6600"
+                        # Real, connected register read -- not calibrated to Celsius yet,
+                        # but close enough to the one known-cold sample (-98C) to report
+                        # a coarse cold/not-cold status honestly, without a fabricated number.
+                        is_cold = temp_info.get("is_near_cold_reference")
+                        if is_cold:
+                            txt = f"Detector Temp: COLD (reg=0x{raw_val:04X})"
+                            fg = "#008800"
+                        else:
+                            txt = f"Detector Temp: NOT AT COLD REF (reg=0x{raw_val:04X})"
+                            fg = "#CC6600"
                     else:
                         txt = "Detector Temp: OFFLINE"
                         fg = "#888888"

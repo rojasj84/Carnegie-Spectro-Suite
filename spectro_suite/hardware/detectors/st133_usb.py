@@ -113,6 +113,17 @@ REG_ACQ_PRETRIGGER   = 0xE0   # One-time read immediately before the trigger wri
 REG_ACQ_TRIGGER      = 0x14   # WRITE value=1 -- best-evidenced acquisition trigger
 REG_ACQ_POSTTRIGGER  = 0x32   # One-time read immediately after the trigger write
 
+# Reference point for REG_TEMPERATURE, captured live while the detector was
+# confirmed cold at -98C (user-verified via WinSpec32, 2026-08-29): the raw
+# register dithers between 0x9191/37265 and 0x9292/37522 -- average used as
+# the reference. No second calibration point exists yet, so this can only
+# support a coarse "near this known reading" vs "drifted away from it" check,
+# not a real Celsius conversion. TOLERANCE is a deliberately rough, roughly
+# 6x the observed ~257-count dither noise floor -- not derived from any real
+# counts-per-degree figure (unknown). Widen/narrow freely; it's a heuristic.
+TEMP_REG_COLD_REFERENCE = 37393  # average of 0x9191/0x9292
+TEMP_REG_COLD_TOLERANCE = 1500
+
 
 class WINUSB_SETUP_PACKET(ctypes.Structure):
     """Standard WinUSB Setup Packet structure."""
@@ -817,18 +828,24 @@ class ST133Camera(BaseCamera):
         offset) have been recovered from either the capture or documentation
         yet. temperature_c is therefore left as None (uncalibrated) rather
         than reporting a fabricated number; raw_register is populated instead
-        so the real reading is still visible. Calibrate by comparing a raw
-        read here against WinSpec32's own displayed temperature at the same
-        moment.
+        so the real reading is still visible.
+
+        is_near_cold_reference gives a coarse, qualitative "still close to
+        the one known-cold reading" check (see TEMP_REG_COLD_REFERENCE/
+        _TOLERANCE) -- useful for confirming the detector is cold without
+        needing an actual calibrated temperature. It is NOT a real
+        temperature threshold, just a proximity check against one sample.
         """
         temp_val = None
         raw_val = None
+        is_near_cold_ref = None
         status_str = "OFFLINE"
 
         if self.is_connected and self._winusb_handle:
             raw_val = self._bulk_read_register(REG_TEMPERATURE)
             if raw_val is not None:
-                status_str = "REGISTER_OK_UNCALIBRATED"
+                is_near_cold_ref = abs(raw_val - TEMP_REG_COLD_REFERENCE) <= TEMP_REG_COLD_TOLERANCE
+                status_str = "NEAR_KNOWN_COLD_POINT" if is_near_cold_ref else "DRIFTED_FROM_COLD_POINT"
                 self._last_temperature = None
 
         return {
@@ -837,6 +854,7 @@ class ST133Camera(BaseCamera):
             "status": 1 if raw_val is not None else 0,
             "status_str": status_str,
             "raw_register": raw_val,
+            "is_near_cold_reference": is_near_cold_ref,
             "is_simulated": False
         }
 
