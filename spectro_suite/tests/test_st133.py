@@ -10,7 +10,12 @@ from spectro_suite.hardware.detectors.st133_usb import (
     USB_SETUP_PACKET,
     IOCTL_VENDOR_REQUEST_OUT,
     IOCTL_VENDOR_REQUEST_IN,
-    IOCTL_READ_FRAME
+    IOCTL_READ_FRAME,
+    BULK_CMD_READ,
+    BULK_CMD_WRITE,
+    REG_SELFTEST,
+    REG_TEMPERATURE,
+    REG_ACQ_TRIGGER,
 )
 
 
@@ -46,22 +51,19 @@ class TestST133Driver(unittest.TestCase):
         self.assertEqual(IOCTL_VENDOR_REQUEST_IN, 0x5500200A)
         self.assertEqual(IOCTL_READ_FRAME, 0x55002021)
 
-    def test_timing_stream_generation(self):
-        """Test opcode compilation for short and long integration times."""
-        # 1. 0.1 second exposure
-        stream_short = self.cam._build_ingaas_timing_stream(0.1)
-        self.assertIsInstance(stream_short, bytes)
-        self.assertEqual(stream_short[0], 0xE0) # Reset shift register
-        self.assertEqual(stream_short[1], 0x20) # Flush gate
-        self.assertIn(0x00, stream_short)      # Clock ADC opcode
-        self.assertIn(0xBD, stream_short)      # Arm complete
+    def test_bulk_protocol_register_constants(self):
+        """Verify bulk-pipe register constants match the live Wireshark capture (2026-08-29)."""
+        self.assertEqual(BULK_CMD_READ, 0x03)
+        self.assertEqual(BULK_CMD_WRITE, 0x02)
+        self.assertEqual(REG_SELFTEST, 0x40)
+        self.assertEqual(REG_TEMPERATURE, 0x46)
+        self.assertEqual(REG_ACQ_TRIGGER, 0x14)
 
-        # 2. Long exposure (> 15 seconds, exceeding 16-bit quanta)
-        stream_long = self.cam._build_ingaas_timing_stream(20.0)
-        self.assertIsInstance(stream_long, bytes)
-        self.assertEqual(stream_long[0], 0xE0)
-        self.assertIn(0x44, stream_long)       # Nested repeat loop start
-        self.assertIn(0x46, stream_long)       # Nested repeat loop end
+    def test_bulk_protocol_no_winusb_returns_safely(self):
+        """Bulk register read/write/frame-read must return None/False without a WinUSB handle, not raise."""
+        self.assertIsNone(self.cam._bulk_read_register(REG_TEMPERATURE))
+        self.assertFalse(self.cam._bulk_write_register(REG_ACQ_TRIGGER, 1))
+        self.assertIsNone(self.cam._bulk_read_frame(1024))
 
     def test_standby_acquisition_integrity(self):
         """Verify driver returns exact zeros and 0 count when in standby without hardware."""
@@ -88,13 +90,6 @@ class TestST133Driver(unittest.TestCase):
         cam1024 = ST133Camera(num_pixels=1024)
         info1024 = cam1024.get_detector_info()
         self.assertEqual(info1024["xdim"], 1024)
-
-        stream1024 = cam1024._build_ingaas_timing_stream(0.1)
-        # Check ADC clock opcode 0x00 followed by little-endian 1024 (0x0400)
-        self.assertEqual(stream1024[-4], 0x00)
-        self.assertEqual(stream1024[-3], 0x00)
-        self.assertEqual(stream1024[-2], 0x04)
-        self.assertEqual(stream1024[-1], 0xBD)
 
 
 if __name__ == "__main__":

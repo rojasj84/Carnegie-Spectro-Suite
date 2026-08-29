@@ -4,43 +4,50 @@ Native 64-Bit Hardware Driver for Princeton Instruments ST-133 InGaAs Detectors.
 Controls Princeton Instruments ST-133 / OMA-V linear InGaAs detectors on 64-bit
 Windows 10/11 through direct kernel communication over USB.
 
-Architecture, confirmed by decompiling the actual installed kernel driver
-(C:/Windows/System32/drivers/piusbwdf.sys, Provider: Princeton Instruments,
-package piusb3.inf) and validating live against real hardware:
-  - IOCTL 0x55002005 = vendor request OUT, 0x5500200A = vendor request IN.
-    Both take an 8-byte header [bRequest, 0,0,0, wValueLo, wValueHi, 0,0] as the
-    IOCTL *input* buffer; 0x55002005 is METHOD_IN_DIRECT, so the bytes actually
-    being written to the device go in the IOCTL *output* buffer slot, not
-    appended to the input buffer.
-  - IOCTL 0x55002021 = start an asynchronous frame read. It does not complete
-    immediately (STATUS_PENDING) -- must be issued as overlapped I/O and either
-    waited on or cleanly cancelled with CancelIoEx. Its counterpart 0x5500201C
-    cancels a pending frame read. Confirmed live: accepted and cleanly
-    cancellable; no frame data observed yet (see _build_ingaas_timing_stream).
-  - IOCTL 0x5500600E reads back the connected device's USB PID and reports
-    which of two supported hardware revisions (PID_A010 vs PID_A026) is
-    attached -- both are legitimate, not a version mismatch.
-  - VR 0xF0 (8-byte IN) and 0xF1 (2-byte IN, firmware version) respond with
-    real data on live hardware; VR 0x8B (temperature), 0xA8/0xAE/0xAF status
-    requests, and register writes for "digitizer mode"/"EPLD arm" do not --
-    the controller answers pure identification requests but not anything
-    requiring the EPLD/detector to actually operate. Root cause unconfirmed;
-    the kernel driver's own CheckFirmwareAndUpgrade routine (present in
-    piusbwdf.sys, pushes a real Cypress FX2 firmware image when the reported
-    firmware version is below 3.6 -- this unit reports 1.0) is the leading
-    candidate, unverified without capturing its DbgPrint output.
-  - Exposure time and gain are NOT sent as standalone commands. PICM_Set_exposuretime
-    (PIXCM32.dll) just stores the value as object state. The actual timing
-    program is compiled from an in-memory linked list of {count, opcode, flag}
-    instructions (PIXCM32.dll FUN_1002c88f / FUN_1002cf00) into a byte buffer by
-    FUN_10029160, then sent via a Pipp32.dll-style bulk write (PIPP_Output_Multiple)
-    before triggering the read. FUN_10029160 is a large (~100+ local variable)
-    routine shared across many PI camera modes; its exact byte-serialization has
-    NOT been fully traced, so _build_ingaas_timing_stream's byte layout below is
-    a best-effort approximation, not a confirmed wire format.
-  - Direct 512-channel linear InGaAs photodiode digitizer reading 16-bit physical
-    counts (512 pixels x 2 bytes = 1024-byte frame, matches observed ADC ceiling
-    near 60000 counts on a 16-bit unsigned readout).
+THE REAL PROTOCOL (confirmed 2026-08-29 via a live Wireshark/USBPcap capture of
+the original 32-bit WinSpec32 software talking to this exact hardware unit,
+VID_0BD7/PID_A010) is bulk-pipe framed commands, NOT EP0 vendor control
+requests. This superseded an earlier, purely decompiled-code-derived theory
+(EP0 vendor requests, cross-validated against Princeton Instruments' own
+rspiusb.c Linux driver) that turned out to describe a real but essentially
+unused command surface for this unit -- only 2 EP0 vendor requests appear in
+an entire real capture session, versus tens of thousands of bulk-pipe frames.
+Frame shape, for both reads and writes, sent to bulk OUT endpoint 0x08:
+    [0x01, addr, 0x00, cmd, data_lo, data_hi]   (fixed 6 bytes)
+  cmd=0x03 ("read-trigger"): device replies with 2 bytes on bulk IN 0x86.
+  cmd=0x02 ("write"): data_lo/data_hi carries the 16-bit value; no reply.
+This requires WinUSB binding -- piusbwdf.sys (KMDF) has no general bulk-pipe
+IOCTL (Part 3: no bulk-write IOCTL was ever found in its dispatch table), so
+none of this works while the device is bound to piusbwdf.sys.
+Confirmed registers (see _bulk_read_register/_bulk_write_register call sites):
+  - 0x40: self-test/echo pattern, always 0x5555 or 0xD5D5. Liveness check only.
+  - 0x46: temperature-adjacent register. Live values track the real captured
+    WinSpec32 session almost exactly (0x9191/0x9292 raw) -- also independently
+    matches PIXCM32.dll's own traced temperature-read register from static
+    analysis (PIPP_Input(handle, 0x46), see git history). Calibration to actual
+    Celsius is NOT yet known -- see get_temperature().
+  - 0xE2, 0xE0, 0x32: read as part of the acquisition sequence (poll loop /
+    one-time pre- and post-trigger reads); always 0 in the captured session.
+    Meaning beyond "some kind of status/handshake check" is unconfirmed.
+  - 0x14: WRITE with value=1 -- the only state-changing write between the
+    busy-poll loop and real pixel data arriving on 0x82 in the captured
+    session. Best-evidenced acquisition trigger; live-confirmed to actually
+    produce a real frame when replayed (see acquire_frame).
+  - Pixel readout (bulk IN 0x82) needs no explicit "arm" request of its own --
+    confirmed live to match piusbwdf.sys's continuous-reader architecture
+    (Parts 4/5): a frame simply arrives once the trigger sequence above has
+    been sent, with WinUSB re-arming the pipe automatically after each read.
+  - EXPOSURE TIME IS NOT YET WIRED TO HARDWARE. No register controlling
+    integration time has been identified in the capture yet -- acquire_frame's
+    exposure_time_sec currently only paces local progress-callback timing.
+
+Earlier EP0-vendor-request-based architecture (IOCTL_VENDOR_REQUEST_OUT/IN,
+piusbwdf.sys's real IOCTL dispatch table, the KMDF overlapped-I/O safety
+pattern) is still real and still implemented below (_vendor_request_out/in,
+_ioctl_overlapped, etc.) -- it's accurate for what it documents, just no
+longer the mechanism used for the core temperature/acquisition/readout path.
+Kept as working infrastructure for the two real EP0 vendor requests observed
+(0xF0/0xF1 status queries) and any future exploration of that command surface.
 """
 
 from __future__ import annotations
@@ -85,12 +92,26 @@ IOCTL_GET_USB_PID        = 0x5500600E   # Reports which of PID_A010 / PID_A026 i
 CYPRESS_FX2_CPUCS = 0xE600                   # Cypress FX2 (CY7C68013A) 8051 CPU Reset Register
 CYPRESS_FX_CPUCS  = 0x7F92                   # Legacy Cypress FX (AN2131) CPU Reset Register
 
-# Hardware Vendor Request Commands (from PIXCM32.dll & USBDRVD.DLL)
+# Hardware Vendor Request Commands (from PIXCM32.dll & USBDRVD.DLL). Real but
+# rarely-used EP0 command surface -- see module docstring. VR_READ_TEMP/
+# VR_EPLD_CONFIG/VR_TRIGGER_ACQ removed 2026-08-29: superseded by the real,
+# live-confirmed bulk-pipe protocol below (BULK_CMD_*/REG_* constants).
 VR_ANCHOR_DOWNLOAD = 0xA0                    # SRAM Microcode Download (Anchor Download)
-VR_EPLD_CONFIG     = 0x8D                    # EPLD / FPGA Register Bank Config
-VR_TRIGGER_ACQ     = 0x01                    # Trigger Hardware Acquisition
 VR_READ_STATUS     = 0x8A                    # Hardware Status & Temp Readback
-VR_READ_TEMP       = 0x8B                    # Read RTD Temperature Sensor
+
+# Real bulk-pipe protocol, confirmed live 2026-08-29 via Wireshark/USBPcap
+# capture of a working 32-bit WinSpec32 session against this exact hardware.
+# Frame: [0x01, addr, 0x00, cmd, data_lo, data_hi] -> bulk OUT 0x08.
+# See module docstring for full provenance and register meanings.
+BULK_CMD_READ  = 0x03   # "read-trigger": 2-byte reply follows on bulk IN 0x86
+BULK_CMD_WRITE = 0x02   # "write": data_lo/data_hi carries the 16-bit value
+
+REG_SELFTEST         = 0x40   # Self-test/echo pattern (0x5555 / 0xD5D5) -- liveness check only
+REG_TEMPERATURE      = 0x46   # Temperature-adjacent register (raw ADC-like code, uncalibrated)
+REG_ACQ_BUSY         = 0xE2   # Polled in a loop while waiting; always 0 in the captured session
+REG_ACQ_PRETRIGGER   = 0xE0   # One-time read immediately before the trigger write
+REG_ACQ_TRIGGER      = 0x14   # WRITE value=1 -- best-evidenced acquisition trigger
+REG_ACQ_POSTTRIGGER  = 0x32   # One-time read immediately after the trigger write
 
 
 class WINUSB_SETUP_PACKET(ctypes.Structure):
@@ -286,74 +307,97 @@ class ST133Camera(BaseCamera):
 
     def _init_controller_handshake(self) -> bool:
         """
-        Execute the controller handshake reverse-engineered from Pipp32.dll's PIFX2
-        communication class (FUN_1000d08b / FUN_1000ddd0), reached via PISCC32.dll's
-        PISCC_CreateCommunicationObject(1) backend from PIXCM32.dll's default
-        controller constructor (ST-133 is the unlisted/default case in
-        PICM_Create_controller's type dispatch, not an explicit numbered case):
-          1. Reset / Flush USB Endpoints (0x08, 0x82, 0x86).
-          2. Set Controller Mode (register 0x22 = 1: High-Speed 16-Bit Digitizer DMA).
-          3. Set Packet Size (register 0x23 = 512 bytes).
-          4. Set Sub-address (register 0x24 = 0).
-          5. Arm EPLD Command Decoder (register 0x26 = 1).
-          6. Query Hardware Status / Presence (VR 0xF0, 0xF1).
+        Lightweight liveness check using the real bulk-pipe protocol: read the
+        self-test/echo register (0x40), confirmed both from a captured real
+        WinSpec32 session and a live replay through this driver (2026-08-29)
+        to always return one of two fixed bit patterns (0x5555 / 0xD5D5).
 
-        NOTE: an earlier version of this docstring claimed registers 0x22/0x23/
-        0x24/0x26 were written as 6-byte packets over the bulk OUT pipe (from
-        decompiling FUN_1000d08b in the legacy Pipp32.dll/USBDRVD.dll stack).
-        That entire call graph was later confirmed to be a dead end for this
-        hardware (see AI Instructions 6.txt Sec. 3 -- it targets a 6-pipe USB
-        topology this 3-pipe device does not have) and does not apply here.
-        _write_register sends these as real EP0 vendor control requests via
-        piusbwdf.sys's IOCTL_VENDOR_REQUEST_OUT, which is independently
-        cross-validated by Princeton Instruments' own GPL Linux driver for this
-        exact hardware (rspiusb.c, see _write_register docstring) -- vendor
-        commands are plain USB control transfers, never bulk-pipe framed. VR
-        0xF0 (1 byte) / 0xF1 (2 bytes) as EP0 IN reads are confirmed live.
+        REPLACES an earlier, longer "handshake" that wrote registers 0x22/
+        0x23/0x24/0x26 over EP0 vendor requests (PICM_Create_controller /
+        PISCC_CreateCommunicationObject theory). That whole approach is now
+        known to be unnecessary: acquire_frame() and get_temperature() were
+        confirmed live to work correctly via the bulk protocol with NO
+        handshake beforehand at all. This check is now purely informational
+        and does NOT gate connect()'s success -- a device that isn't yet on
+        WinUSB (still piusbwdf.sys-bound, no bulk-pipe access) just fails
+        this check harmlessly; connect() still succeeds either way, since
+        WinUSB binding is what actually determines whether the bulk protocol
+        (and therefore real communication) is available.
         """
-        if not self._device_handle or not kernel32:
+        if not self._winusb_handle or not winusb:
+            logger.debug("Self-test skipped: bulk-pipe protocol requires WinUSB binding.")
             return False
 
         try:
-            # 1. Reset / Flush active endpoints
-            if self._winusb_handle and winusb:
-                for p_id in [0x00, 0x08, 0x82, 0x86]:
-                    try:
-                        winusb.WinUsb_ResetPipe(self._winusb_handle, p_id)
-                    except Exception:
-                        pass
-
-            steps = []
-            # 2. Configure High-Speed 16-Bit Digitizer Mode (register 0x22 = 1)
-            steps.append(("REG/0x22", self._write_register(0x22, 1)))
-
-            # 3. Configure USB Endpoint Packet Size (register 0x23 = 512)
-            steps.append(("REG/0x23", self._write_register(0x23, 512)))
-
-            # 4. Set Controller Sub-address (register 0x24 = 0)
-            steps.append(("REG/0x24", self._write_register(0x24, 0)))
-
-            # 5. Arm EPLD Command Decoder (register 0x26 = 1)
-            steps.append(("REG/0x26", self._write_register(0x26, 1)))
-
-            # 6. Query Hardware Status / Presence (VR 0xF0, 0xF1)
-            # NOTE: VR 0xF0 must be requested with length>=2 (was length=1) --
-            # live-confirmed 2026-08-28 that a 1-byte request STALLs the
-            # control endpoint (WinUsb_ControlTransfer -> ERROR_GEN_FAILURE),
-            # while length=8 (matching the module docstring) completes cleanly.
-            steps.append(("F0", self._vendor_request_in(0xF0, length=8) is not None))
-            steps.append(("F1", self._vendor_request_in(0xF1, length=2) is not None))
-
-            failed = [name for name, ok in steps if not ok]
-            if failed:
-                logger.warning(f"Controller handshake steps did not respond (device did not ACK): {failed}")
-                return False
-
-            logger.info("ST-133 controller handshake & EPLD decoder armed successfully.")
-            return True
+            val = self._bulk_read_register(REG_SELFTEST)
+            ok = val in (0x5555, 0xD5D5)
+            if ok:
+                logger.info(f"ST-133 self-test register (0x{REG_SELFTEST:02X}) responded: 0x{val:04X} -- bulk-pipe protocol live.")
+            else:
+                logger.debug(f"ST-133 self-test register did not respond as expected (got {val!r}).")
+            return ok
         except Exception as ex:
             logger.warning(f"Controller handshake notice: {ex}")
             return False
+
+    def _bulk_read_register(self, addr: int) -> Optional[int]:
+        """
+        Read a controller register over the real bulk-pipe protocol: write
+        [0x01, addr, 0x00, 0x03, 0x00, 0x00] to bulk OUT 0x08, then read 2
+        bytes back from bulk IN 0x86. This is the actual wire protocol the
+        real 32-bit WinSpec32 software uses -- reverse-engineered directly
+        from a live Wireshark/USBPcap capture of a working WinSpec32 session
+        against this exact hardware (2026-08-29), not decompiled-code
+        inference. Requires WinUSB (see module docstring). Pipe timeouts are
+        set once in connect() via WinUsb_SetPipePolicy.
+        """
+        if not self._winusb_handle or not winusb:
+            return None
+        pkt = bytes([0x01, addr & 0xFF, 0x00, BULK_CMD_READ, 0x00, 0x00])
+        buf = (ctypes.c_ubyte * 6)(*pkt)
+        trans = wintypes.ULONG(0)
+        wres = winusb.WinUsb_WritePipe(self._winusb_handle, 0x08, buf, 6, ctypes.byref(trans), None)
+        if not wres:
+            return None
+        read_buf = ctypes.create_string_buffer(2)
+        trans2 = wintypes.ULONG(0)
+        rres = winusb.WinUsb_ReadPipe(self._winusb_handle, 0x86, read_buf, 2, ctypes.byref(trans2), None)
+        if not rres or trans2.value != 2:
+            return None
+        return int.from_bytes(read_buf.raw[:2], "little")
+
+    def _bulk_write_register(self, addr: int, value: int) -> bool:
+        """
+        Write a controller register over the real bulk-pipe protocol: send
+        [0x01, addr, 0x00, 0x02, value_lo, value_hi] to bulk OUT 0x08. No
+        reply is read -- writes were never followed by an 0x86 read in the
+        captured session. See _bulk_read_register for full provenance.
+        """
+        if not self._winusb_handle or not winusb:
+            return False
+        pkt = bytes([0x01, addr & 0xFF, 0x00, BULK_CMD_WRITE, value & 0xFF, (value >> 8) & 0xFF])
+        buf = (ctypes.c_ubyte * 6)(*pkt)
+        trans = wintypes.ULONG(0)
+        res = winusb.WinUsb_WritePipe(self._winusb_handle, 0x08, buf, 6, ctypes.byref(trans), None)
+        return bool(res)
+
+    def _bulk_read_frame(self, expected_bytes: int) -> Optional[bytes]:
+        """
+        Read raw frame bytes from the pixel pipe (bulk IN 0x82). Confirmed
+        live 2026-08-29: no explicit "arm" request is needed on 0x82 itself
+        (matches piusbwdf.sys's continuous-reader architecture, Parts 4/5) --
+        data simply arrives once the acquisition trigger sequence (see
+        acquire_frame) has been sent. WinUsb_ReadPipe's own pipe-policy
+        timeout (set once in connect()) bounds this call.
+        """
+        if not self._winusb_handle or not winusb:
+            return None
+        buf = ctypes.create_string_buffer(expected_bytes)
+        trans = wintypes.ULONG(0)
+        res = winusb.WinUsb_ReadPipe(self._winusb_handle, 0x82, buf, expected_bytes, ctypes.byref(trans), None)
+        if res and trans.value > 0:
+            return buf.raw[:trans.value]
+        return None
 
     def _write_register(self, addr: int, value: int) -> bool:
         """
@@ -662,86 +706,21 @@ class ST133Camera(BaseCamera):
             logger.warning(f"Firmware SRAM bootstrap notice: {ex}")
             return False
 
-    def _build_ingaas_timing_stream(self, exposure_time_sec: float) -> bytes:
+    def _trigger_acquisition(self) -> None:
         """
-        Build a best-effort approximation of the hardware timing microcode for
-        the OMA-V InGaAs array. NOT a confirmed wire format -- see below.
-
-        The real mechanism (traced through PIXCM32.dll) does not build a flat
-        byte stream at all: PICM_Set_exposuretime just stores the value as
-        object state, and the actual timing program is assembled as an
-        in-memory doubly-linked list of {count: u32, opcode: u8, flag: u8}
-        instructions (FUN_1002c88f / FUN_1002cf00), which a large, shared,
-        multi-camera-mode routine (FUN_10029160, PIXCM32.dll) then compiles
-        into a byte buffer and sends via a Pipp32.dll-style bulk write
-        (PIPP_Output_Multiple) before triggering the read. FUN_10029160's
-        exact serialization has not been fully traced (100+ local variables,
-        many device-type branches) -- opcodes below are corrected against what
-        FUN_1002c88f actually emits (0xE0/0x20/0x44/0x46/0xBD/0x30; 0x40 never
-        appears despite an earlier version of this code claiming it did) but
-        the overall byte layout is still a guess, not the compiled output of
-        FUN_10029160. The confirmed way to trigger a read on the real driver
-        is IOCTL_READ_FRAME (0x55002021, see acquire_frame) -- this function's
-        output is not currently sent anywhere on that path.
+        Replay the acquisition-trigger sequence, byte-for-byte as captured
+        from a real, working WinSpec32 session against this exact hardware
+        (2026-08-29): poll the busy register a few times, one read of the
+        pre-trigger register, WRITE the trigger register (the only state
+        change in the whole captured sequence before pixel data appeared),
+        then one post-trigger read. Live-confirmed to actually produce a
+        real 1024-byte frame on 0x82 when replayed through this driver.
         """
-        quanta_count = int(max(1, (exposure_time_sec * 1_000_000.0) / self._quantum_us))
-        
-        stream = bytearray()
-        
-        # 1. Pre-charge array flush (Clear dark accumulation)
-        stream.append(0xE0) # Opcode: Reset shift register
-        stream.append(0x20) # Opcode: Flush gate
-        
-        # 2. Program Integration Loop
-        if quanta_count > 65535:
-            loops = quanta_count // 65535
-            rem = quanta_count % 65535
-            
-            # Nested loop start
-            stream.append(0x44)
-            stream.extend(struct.pack("<H", loops))
-            stream.append(0x30)
-            stream.extend(struct.pack("<H", 0xFFFF))
-            stream.append(0x46)
-            stream.append(0xBD)
-            
-            if rem > 0:
-                stream.append(0x30)
-                stream.extend(struct.pack("<H", rem))
-        else:
-            stream.append(0x30)
-            stream.extend(struct.pack("<H", max(1, quanta_count)))
-            
-        # 3. Readout trigger & ADC pixel shift clocking for 512 channels
-        stream.append(0x00) # Opcode: Clock ADC
-        stream.extend(struct.pack("<H", self.num_pixels))
-        stream.append(0xBD) # Opcode: Arm complete
-        
-        return bytes(stream)
-
-    def _arm_gate_and_trigger(self, exposure_time_sec: float) -> bool:
-        """
-        Arm the EPLD timing generator and assert the hardware acquisition trigger.
-
-        NOTE: VR 0x8D (EPLD config) and VR 0x01 (trigger) below are carried over
-        from before this driver's real IOCTL interface was known and have never
-        been tested against real hardware -- unlike 0xF0/0xF1/0x8B/0xAF/0xA8/0xAE,
-        none of which are used here. The confirmed acquisition-trigger mechanism
-        on the real driver is IOCTL_READ_FRAME itself (0x55002021, see
-        acquire_frame): issuing it starts an async pended read rather than
-        requiring a separate discrete "start" command. This method's vendor
-        requests are speculative and may be doing nothing (or the wrong thing).
-        """
-        timing_stream = self._build_ingaas_timing_stream(exposure_time_sec)
-
-        # 1. Dispatch timing microcode to EPLD register bank (Vendor Request 0x8D)
-        armed = self._vendor_request_out(VR_EPLD_CONFIG, w_value=0, w_index=0, data=timing_stream)
-        if not armed:
-            logger.debug("EPLD config transfer returned non-zero status (expected during standby).")
-
-        # 2. Issue Acquisition Start Trigger (Vendor Request 0x01)
-        exp_ms = int(max(10, exposure_time_sec * 1000.0))
-        return self._vendor_request_out(VR_TRIGGER_ACQ, w_value=min(65535, exp_ms), w_index=0)
+        for _ in range(3):
+            self._bulk_read_register(REG_ACQ_BUSY)
+        self._bulk_read_register(REG_ACQ_PRETRIGGER)
+        self._bulk_write_register(REG_ACQ_TRIGGER, 1)
+        self._bulk_read_register(REG_ACQ_POSTTRIGGER)
 
     def disconnect(self):
         """Close communication handles cleanly."""
@@ -768,15 +747,32 @@ class ST133Camera(BaseCamera):
         stop_requested: Optional[Callable[[], bool]] = None,
     ) -> Tuple[np.ndarray, int]:
         """
-        Execute physical exposure and read raw 512-pixel InGaAs spectrum.
+        Execute physical exposure and read raw 512-pixel InGaAs spectrum via
+        the real bulk-pipe protocol (see module docstring). Live-confirmed
+        working 2026-08-29: this exact trigger sequence, replayed from a
+        captured real WinSpec32 session, produced a real 1024-byte frame with
+        plausible detector-noise-floor values.
+
+        NOTE: exposure_time_sec is NOT yet wired to hardware -- no register
+        controlling integration time has been identified in the capture yet.
+        It currently only paces local progress_callback timing; the actual
+        exposure duration is whatever the controller itself uses internally.
+
         Returns exact zeros (0 counts) when hardware is in standby (no synthetic data).
         """
-        if not self.is_connected or not kernel32:
+        if not self.is_connected or not self._winusb_handle:
             if not self.connect():
                 return np.zeros(self.num_pixels, dtype=np.int64), 0
 
-        # 1. Arm EPLD Gate & Assert Hardware Acquisition Trigger
-        self._arm_gate_and_trigger(exposure_time_sec)
+        if not self._winusb_handle:
+            logger.warning(
+                "Bulk-pipe protocol requires WinUSB binding -- device is currently "
+                "on piusbwdf.sys, which has no general bulk-pipe access."
+            )
+            return np.zeros(self.num_pixels, dtype=np.int64), 0
+
+        # 1. Replay the captured acquisition-trigger sequence
+        self._trigger_acquisition()
 
         # 2. Wait for Exposure Duration with Real-Time Progress Updates
         steps = max(1, int(exposure_time_sec / 0.05))
@@ -787,40 +783,12 @@ class ST133Camera(BaseCamera):
             if progress_callback:
                 progress_callback(min(1.0, (step + 1) / steps))
 
-        # 3. Read 512 uint16 Pixels (1024 bytes) from Bulk IN Pipe (0x82)
+        # 3. Read 512 uint16 Pixels (1024 bytes) from the pixel pipe (0x82)
         expected_bytes = self.num_pixels * 2
-        read_buf = ctypes.create_string_buffer(expected_bytes)
-        bytes_read = wintypes.DWORD(0)
+        frame_bytes = self._bulk_read_frame(expected_bytes)
 
-        # A. WinUSB Direct Pipe Read (0x82)
-        if self._winusb_handle and winusb:
-            trans = wintypes.ULONG(0)
-            res_wu = winusb.WinUsb_ReadPipe(
-                self._winusb_handle,
-                0x82, # Endpoint 2 Bulk IN
-                read_buf,
-                expected_bytes,
-                ctypes.byref(trans),
-                None
-            )
-            if res_wu and trans.value >= expected_bytes:
-                raw_data = np.frombuffer(read_buf.raw[:expected_bytes], dtype=np.uint16)
-                return raw_data.astype(np.int64), 1
-
-        # B. KMDF IOCTL_READ_FRAME (piusbwdf.sys) -- confirmed live to be an
-        # asynchronous/pended request (STATUS_PENDING, not completed inline).
-        # _ioctl_overlapped() handles the overlapped-I/O dance and bounded
-        # cancellation this requires -- see its docstring for why a plain
-        # synchronous DeviceIoControl call is not safe here. Confirmed live:
-        # the request is accepted and cleanly cancellable; no frame data has
-        # been observed yet (see module docstring).
-        timeout_ms = int(max(1000, exposure_time_sec * 1000 + 500))
-        ok, bytes_ret = self._ioctl_overlapped(IOCTL_READ_FRAME, None, read_buf, expected_bytes, timeout_ms)
-        bytes_read.value = bytes_ret
-
-        # 4. If Physical Pixels Received over USB DMA:
-        if ok and bytes_read.value >= expected_bytes:
-            raw_data = np.frombuffer(read_buf.raw[:expected_bytes], dtype=np.uint16)
+        if frame_bytes and len(frame_bytes) >= expected_bytes:
+            raw_data = np.frombuffer(frame_bytes[:expected_bytes], dtype=np.uint16)
             return raw_data.astype(np.int64), 1
 
         # Strict scientific integrity: Return exact zeros when in standby
@@ -839,29 +807,36 @@ class ST133Camera(BaseCamera):
 
     def get_temperature(self) -> Optional[dict]:
         """
-        Query physical InGaAs sensor cryogenic cooling temperature from hardware.
-        Returns None / OFFLINE unless physical RTD sensor bytes are read from instrument.
+        Query the temperature-adjacent register (0x46) via the real bulk-pipe
+        protocol -- live-confirmed 2026-08-29 against real hardware, with
+        values tracking a real captured WinSpec32 session on the same unit
+        almost exactly (raw 0x9191/0x9292).
+
+        NOTE: the raw register value itself is real and live; the conversion
+        to degrees Celsius is NOT confirmed -- no calibration constants (slope/
+        offset) have been recovered from either the capture or documentation
+        yet. temperature_c is therefore left as None (uncalibrated) rather
+        than reporting a fabricated number; raw_register is populated instead
+        so the real reading is still visible. Calibrate by comparing a raw
+        read here against WinSpec32's own displayed temperature at the same
+        moment.
         """
         temp_val = None
+        raw_val = None
         status_str = "OFFLINE"
-        
-        if self.is_connected and self._device_handle and kernel32:
-            # Query RTD temperature sensor via Vendor Request 0x8B
-            resp = self._vendor_request_in(VR_READ_TEMP, length=4)
-            if resp and len(resp) >= 2:
-                raw_adc = struct.unpack("<h", resp[:2])[0]
-                # Convert raw RTD counts to Celsius (-100.0 C typical for LN2 Dewar)
-                calc_temp = (raw_adc / 10.0)
-                if -150.0 <= calc_temp <= 50.0:
-                    temp_val = calc_temp
-                    self._last_temperature = temp_val
-                    status_str = "LOCKED"
+
+        if self.is_connected and self._winusb_handle:
+            raw_val = self._bulk_read_register(REG_TEMPERATURE)
+            if raw_val is not None:
+                status_str = "REGISTER_OK_UNCALIBRATED"
+                self._last_temperature = None
 
         return {
             "temperature_c": temp_val,
-            "setpoint_c": -97.5 if temp_val is not None else None,
-            "status": 1 if temp_val is not None else 0,
+            "setpoint_c": None,
+            "status": 1 if raw_val is not None else 0,
             "status_str": status_str,
+            "raw_register": raw_val,
             "is_simulated": False
         }
 
