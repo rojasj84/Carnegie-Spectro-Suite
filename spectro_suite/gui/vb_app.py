@@ -501,16 +501,22 @@ class VBFormApp(tk.Tk):
                     t_val = temp_info.get("temperature_c")
                     st_str = temp_info.get("status_str", "")
                     stat_code = temp_info.get("status", 0)
+                    raw_val = temp_info.get("raw_register")
 
-                    if t_val is None or st_str == "OFFLINE" or is_sim:
+                    if st_str == "OFFLINE" or is_sim:
                         txt = "Detector Temp: OFFLINE"
                         fg = "#888888"
-                    elif st_str:
-                        txt = f"Detector Temp: {t_val:.1f} °C [{st_str}]"
+                    elif t_val is not None:
+                        txt = f"Detector Temp: {t_val:.1f} °C" + (f" [{st_str}]" if st_str else "")
                         fg = "#008800" if stat_code == 2 else ("#CC6600" if stat_code == 1 else "#CC0000")
+                    elif raw_val is not None:
+                        # Real, connected register read -- just not calibrated to Celsius yet.
+                        # Show the raw value honestly rather than a fabricated temperature.
+                        txt = f"Detector Temp: reg=0x{raw_val:04X} (uncalibrated)"
+                        fg = "#CC6600"
                     else:
-                        txt = f"Detector Temp: {t_val:.1f} °C"
-                        fg = "#008800" if stat_code == 2 else ("#CC6600" if stat_code == 1 else "#CC0000")
+                        txt = "Detector Temp: OFFLINE"
+                        fg = "#888888"
 
                     self._safe_ui(lambda t=txt, c=fg: self.sbr_temp.config(text=t, foreground=c))
                 else:

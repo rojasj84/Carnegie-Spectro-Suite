@@ -1,19 +1,19 @@
 {
-  "default_profile": "Horiba Jobin Yvon HR460 (COM1)",
+  "default_profile": "Custom",
   "remember_choice": true,
   "saved_config": {
     "active_grating_index": 0,
-    "num_pixels": 512,
-    "instrument_model": "HR460",
+    "num_pixels": 1024,
+    "instrument_model": "Acton SP-2-150i",
     "camera_model": "Princeton Instruments ST-133 InGaAs (512)",
-    "com_port": "COM1",
+    "com_port": "COM3",
     "baudrate": 9600,
     "spe_data_path": "calib.spe",
     "gratings": [
       {
-        "laser_wavelength": 514.532,
+        "laser_wavelength": 1064.0,
         "central_pixel": 256.0,
-        "grating_grooves_per_mm": 1800.0,
+        "grating_grooves_per_mm": 300.0,
         "inclusion_angle_rad": 0.288,
         "focal_length_mm": 460.0,
         "oma_element_size_mm": -0.02765,
@@ -25,16 +25,16 @@
         "accumulations": 1
       },
       {
-        "laser_wavelength": 514.532,
+        "laser_wavelength": 1064.0,
         "central_pixel": 256.0,
-        "grating_grooves_per_mm": 300.0,
+        "grating_grooves_per_mm": 600.0,
         "inclusion_angle_rad": 0.288,
         "focal_length_mm": 460.0,
         "oma_element_size_mm": -0.02765,
         "correction_angle_deg": 0.0,
         "steps_per_nm_at_1200": 160.0,
         "spectrometer_pos_nm": 700.0,
-        "slit_size": 10.0,
+        "slit_size": 30.0,
         "exposure_time_sec": 1.0,
         "accumulations": 1
       }
