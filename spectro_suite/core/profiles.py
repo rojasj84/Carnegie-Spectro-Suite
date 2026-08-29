@@ -18,7 +18,7 @@ from ..config import SpectrometerConfig, GratingConfig
 
 logger = logging.getLogger("spectro_suite")
 
-SETTINGS_FILE = "app_settings.json"
+SETTINGS_FILE = "config/app_settings.json"
 
 
 def get_default_profiles() -> Dict[str, SpectrometerConfig]:
@@ -28,7 +28,7 @@ def get_default_profiles() -> Dict[str, SpectrometerConfig]:
     profiles: Dict[str, SpectrometerConfig] = {}
 
     # 1. Acton SpectraPro SP-2150 (SP2150i)
-    acton_cfg_path = "config_acton_sp2150.json"
+    acton_cfg_path = "config/config_acton_sp2150.json"
     if os.path.exists(acton_cfg_path):
         try:
             profiles["Acton SpectraPro SP-2150 (COM3)"] = SpectrometerConfig.from_json(acton_cfg_path)

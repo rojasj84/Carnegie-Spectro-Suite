@@ -35,5 +35,5 @@ ENV/
 *.swo
 
 # Local app settings / temp logs
-app_settings.json
+config/app_settings.json
 *.log

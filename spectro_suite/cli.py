@@ -107,7 +107,7 @@ def main():
         print(f"Successfully exported {args.input_spe} -> {args.output_dat} ({spe.xdim} points)")
 
     elif args.command == "info":
-        cfg_path = args.config or ("config_acton_sp2150.json" if os.path.exists("config_acton_sp2150.json") else ("Wsp-460.cfg" if os.path.exists("Wsp-460.cfg") else None))
+        cfg_path = args.config or ("config/config_acton_sp2150.json" if os.path.exists("config/config_acton_sp2150.json") else ("Wsp-460.cfg" if os.path.exists("Wsp-460.cfg") else None))
         if cfg_path and os.path.exists(cfg_path):
             cfg = SpectrometerConfig.from_legacy_cfg(cfg_path) if cfg_path.endswith(".cfg") else SpectrometerConfig.from_json(cfg_path)
         else:

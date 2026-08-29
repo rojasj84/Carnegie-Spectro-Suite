@@ -95,7 +95,7 @@ class HoribaApp(ctk.CTk):
         self._start_temperature_poller()
 
     def _find_default_config(self) -> Optional[str]:
-        candidates = ["config_acton_sp2150.json", "Wsp-460.cfg", "DEFAULT.CFG", "wsp-460.cfg"]
+        candidates = ["config/config_acton_sp2150.json", "Wsp-460.cfg", "DEFAULT.CFG", "wsp-460.cfg"]
         for c in candidates:
             if os.path.exists(c):
                 return c
