@@ -3,7 +3,7 @@
   "remember_choice": true,
   "saved_config": {
     "active_grating_index": 0,
-    "num_pixels": 1024,
+    "num_pixels": 512,
     "instrument_model": "Acton SP-2-150i",
     "camera_model": "Princeton Instruments ST-133 InGaAs (512)",
     "com_port": "COM3",
