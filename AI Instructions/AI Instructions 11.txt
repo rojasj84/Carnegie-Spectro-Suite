@@ -1,0 +1,226 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 11)
+================================================================================
+Document: AI Instructions 11.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+READ THIS FIRST. Part 10 documented the breakthrough: real bulk-pipe protocol
+extracted from a live capture, first-ever real temperature and CCD reads. This
+part covers what happened right after: the driver stopped delivering frames
+after a physical detector reboot, a long session of live hypothesis-testing
+that ruled out several plausible fixes one by one, a corrected trigger
+sequence extracted from a second fresh capture that is now BYTE-IDENTICAL to
+a real working session and STILL doesn't produce a frame, and the open
+question this leaves. The user is about to reboot to test the USB connection
+again -- resume directly from Sec. 5 (current state) when they're back.
+
+--------------------------------------------------------------------------------
+ 1. WHAT BROKE, AND WHY IT'S NOT A CODE REGRESSION
+--------------------------------------------------------------------------------
+Mid-session (after Part 10's driver was working), the user physically rebooted
+the detector to clear a suspected stuck ring-buffer state. After that, the
+driver's trigger sequence stopped producing any frames at all -- not even the
+first attempt after a fresh connect(), which had previously been reliable.
+
+The user then let the ORIGINAL 32-bit WinSpec32 machine fully re-initialize
+the device with a genuine cold-boot capture running the entire time (USB
+Capture/USBCapture-AQTime3.pcapng: cable plug-in -> WinSpec32 launch -> real
+1-second acquisition, all captured), confirming the hardware itself is
+completely healthy. The cable was then moved back to the 64-bit machine.
+
+IMPORTANT LESSON, confirmed via git diff: moving the USB cable between
+machines is NOT a transparent hand-off -- it's a full bus reset / re-
+enumeration, indistinguishable from a physical power-cycle from the device's
+perspective. Direct evidence: the first connect() attempt after moving the
+cable back failed with "No Princeton Instruments ST-133 USB controller
+detected on PnP bus" (a genuine PnP re-arrival event), before a retry
+succeeded. Whatever session state a real WinSpec32 run builds up does NOT
+survive a cable move, only a truly unbroken connection.
+
+Ran `git diff 2608036 -- spectro_suite/hardware/detectors/st133_usb.py`
+(2608036 = the commit where real data was FIRST successfully read, Part 10)
+against the current driver and confirmed the wire-format bytes for
+_bulk_read_register/_bulk_write_register/_trigger_acquisition and connect()'s
+WinUSB init were 100% UNCHANGED. Every diff since then was additive
+(threading lock, self-test-check logic, temperature status cosmetics) and
+none of it touches the actual bytes sent. THIS IS NOT A CODE REGRESSION --
+the driver sends today exactly what it sent the day it worked. The gap is
+something about device/session state or the WinUSB binding itself, not a bug
+introduced along the way.
+
+--------------------------------------------------------------------------------
+ 2. HYPOTHESES TESTED LIVE AND RULED OUT (all against real hardware)
+--------------------------------------------------------------------------------
+All of the following were tested on real hardware and definitively failed to
+restore frame delivery, either alone or combined:
+
+  a. Continuous background heartbeat thread. Added a real threading.Thread
+     (_heartbeat_loop/_start_heartbeat/_stop_heartbeat in st133_usb.py,
+     started in connect(), stopped in disconnect()) that continuously writes
+     to the self-test/echo register and a "walking bit pattern" register --
+     motivated by a true cold-boot capture (AQTime3) showing real WinSpec32
+     NEVER goes quiet on the bulk pipe for the entire session, not just at
+     init. Tested alone: NO FRAME. Tested with a 30-second soak (matching the
+     real capture's ~300 heartbeat cycles before its trigger fired, versus
+     the first quick test's ~15-20 cycles): STILL NO FRAME. Duration is not
+     the missing variable either.
+  b. EP0 0xF0 arm call alone (the real control transfer WinSpec32 sends right
+     before every trigger: bRequest=0xF0, RequestType=0x40, wValue=0, 8-byte
+     zero payload) -- succeeds technically (res=1, 8 bytes, no error) but
+     alone: NO FRAME.
+  c. Full reconfiguration burst alone (see Sec. 3 for the corrected version):
+     NO FRAME.
+  d. All three combined (heartbeat + burst + EP0 arm): NO FRAME.
+  e. Direct status-register check: read 0xE2/0xE0/0x32 directly -- all read
+     exactly 0, matching the "ready" state from the original working capture.
+     Device is NOT stuck busy. Temperature register read 37265 (essentially
+     exactly the known cold reference 37393, well within the observed dither
+     noise floor) -- device is confirmed still cold, ruling out "detector
+     warmed up and refuses to transmit" as the explanation too (this was a
+     good hypothesis raised by the user and worth re-checking if temperature
+     drift is ever suspected again).
+  f. "Detector remembers this host attempted bad communication and locked it
+     out" (also raised by the user) -- considered and rejected as the leading
+     explanation: register I/O has stayed perfectly healthy through every
+     single test (clean ACKs, correct values) even right after the most
+     aggressive probing; the failure is surgically confined to ONLY the pixel
+     push on 0x82, not a general degradation; and this class of hardware
+     (Cypress FX2-era 8051 firmware, ~1999-2007 scientific instrument) has no
+     known mechanism for host-identity fingerprinting. Not disprovable in
+     principle, but no evidence points to it, and it doesn't explain the
+     pattern (see Sec. 4) as well as a binding-level difference does.
+
+--------------------------------------------------------------------------------
+ 3. THE CORRECTED TRIGGER SEQUENCE (real fix, extracted from a fresh capture)
+--------------------------------------------------------------------------------
+The user took a NEW capture on the 32-bit machine (USB Capture/
+USBCapture-AQTime4.pcapng, 5223 packets, a clean 0.1/0.2/0.5/1s exposure
+sweep on a newly re-enumerated device, target bus=3/device=8) specifically to
+sanity-check whether the 32-bit side still works (it does, flawlessly) and to
+get fresh ground truth. Decoding the packets immediately before all 4 real
+triggers revealed a MAJOR correction to Part 10's understanding:
+
+  addr=0xE2 (REG_ACQ_BUSY) and addr=0xE0 (REG_ACQ_PRETRIGGER) -- which the
+  Part-10 driver polled 3x and 1x respectively before EVERY trigger --
+  APPEAR ZERO TIMES ANYWHERE in this entire fresh, working, 5223-packet
+  session, across all 4 real acquisitions. They were real registers seen
+  ONCE in the original Part-10 capture, but not actually part of the
+  immediate trigger sequence -- including them there was pure noise at best.
+
+  Worse: an earlier same-day live test (Sec. 2d) added the real reconfig
+  burst and EP0 arm call as bolt-ons AROUND the old 0xE2/0xE0-polling
+  sequence, which inserted those two reads BETWEEN the EP0 arm call and the
+  WRITE 0x14 trigger -- breaking the tight adjacency the real device uses
+  (arm call immediately followed by the trigger write, NOTHING in between).
+  This is suspected to be part of why that combined test still failed.
+
+The REAL, complete, confirmed trigger sequence (verified byte-for-byte
+identical before the first two of the four real triggers in AQTime4):
+    WRITE 0x30=0, WRITE 0x30=1, WRITE 0x30=3,
+    WRITE 0x00=0, WRITE 0xFE=0, WRITE 0x3C=1, WRITE 0x22=0, WRITE 0x24=1,
+    [EP0 0xF0 arm call -- bRequest=0xF0, 8 zero bytes],
+    WRITE 0x14=1   (the trigger; NOTHING between the arm call and this),
+    READ 0x32      (post-trigger, reads 0 in both real samples checked)
+
+Also corrected: the real continuous "walking bit pattern" heartbeat register
+is 0x4A, NOT 0x54 as originally guessed for the Sec. 2a heartbeat thread --
+0x54 never appears anywhere in AQTime4, while 0x4A is BY FAR the single most
+active register in the whole capture (1664 writes across ~5200 packets,
+cycling mostly between 0x0C/0x0E with occasional 0x0D/0x0F/0x08/0x00).
+
+st133_usb.py was updated to match (uncommitted as of this writing -- see Sec.
+5): REG_RECONFIG_BURST constant added, _ep0_arm_call() helper added,
+_trigger_acquisition() rewritten to send the burst -> arm -> trigger -> post-
+trigger-read sequence exactly as above (REG_ACQ_BUSY/REG_ACQ_PRETRIGGER
+constants removed), REG_HEARTBEAT_WALK fixed to 0x4A, walk_cycle values in
+_heartbeat_loop updated to match the real observed pattern. test_st133.py
+updated with a new test_trigger_sequence_matches_fresh_capture test locking
+in both corrections. Full suite (9 tests) passes.
+
+NOTE: the heartbeat thread's log message in _start_heartbeat() still says
+"0x40/0x54 activity" -- cosmetic, harmless, just not updated when the walk
+register constant was fixed. Fix if it's noticed again.
+
+--------------------------------------------------------------------------------
+ 4. THE CORRECTED SEQUENCE STILL DOESN'T PRODUCE A FRAME -- THIS IS THE REAL
+    OPEN QUESTION
+--------------------------------------------------------------------------------
+Live-tested the corrected sequence multiple ways, all against real hardware
+on the 64-bit machine:
+  - acquire_frame() with the new _trigger_acquisition(): NO FRAME (0.5s,
+    1.0s, 0.2s all tried, back-to-back).
+  - Posting the WinUsb_ReadPipe(0x82) call IMMEDIATELY after triggering
+    (extending that pipe's timeout policy first) instead of sleeping out the
+    exposure before reading -- to match the real capture's ordering, where
+    the read request appears to be posted essentially right after the
+    trigger write: STILL NO FRAME (clean timeout, GetLastError=121 /
+    ERROR_SEMAPHORE_TIMEOUT, not an immediate failure).
+  - A fully verbose test (heartbeat stopped, every single write/arm/read's
+    ACK status printed individually): EVERY step succeeds cleanly --
+    all 8 reconfig writes ok=True, EP0 arm ok=True/GetLastError=0, trigger
+    write ok=True, post-trigger read returns 0 (exact match to the real
+    capture). Device confirmed still fully healthy immediately after (self-
+    test echo round-trips correctly, temperature reads 37265, matching cold
+    reference). WinUsb_ReadPipe(0x82) still times out with zero bytes.
+
+CONCLUSION: the register-level / semantic protocol is now confirmed
+byte-identical to a real, working session, and it still does not produce a
+frame. This rules out the command CONTENT as the remaining gap -- everything
+observable through packet content has been exhausted and matched exactly.
+
+The leading working hypothesis (NOT YET TESTED) is that the gap is something
+NOT visible in a packet-content diff at all: most likely a difference in how
+WinUSB binds/configures the USB interface versus how piusbwdf.sys (the real
+KMDF driver WinSpec32 uses) does it. This project has only ever reverse-
+engineered piusbwdf.sys's IOCTL dispatch table (the commands it responds to
+once bound) -- never its device-initialization path (AddDevice /
+EvtDevicePrepareHardware), which could issue a SET_CONFIGURATION,
+SET_INTERFACE, or vendor setup call that WinUSB's generic binding never
+replicates, and that the firmware might silently require before it will
+actually push data on 0x82 regardless of what's sent afterward.
+
+THE HIGHEST-VALUE NEXT STEP: capture the 64-bit driver's OWN USB traffic with
+Wireshark/USBPcap (same tooling that produced every breakthrough so far) on
+the 64-bit machine while it attempts a trigger, then diff that capture
+against the real WinSpec32 session at the packet-header level (not just
+payload content) -- specifically looking for differences in interface
+claiming, SET_CONFIGURATION/SET_INTERFACE requests, or anything structural
+that happens before or alongside the register writes, not just the register
+writes themselves. This is the same methodology that cracked the bulk-pipe
+protocol in Part 10 and the corrected trigger sequence in Sec. 3 above --
+apply it one level deeper (transport/binding, not command content).
+
+--------------------------------------------------------------------------------
+ 5. CURRENT STATE / RESUME HERE
+--------------------------------------------------------------------------------
+  - User is about to physically reboot (their own machine, to test the USB
+    connection) and will resume this conversation afterward. No live hardware
+    test was in progress at interruption -- safe to pick up cleanly.
+  - Uncommitted changes as of this writing (git status):
+      M spectro_suite/hardware/detectors/st133_usb.py  (Sec. 2a heartbeat +
+        Sec. 3 corrected trigger sequence)
+      M spectro_suite/tests/test_st133.py              (new tests for both)
+      ?? USB Capture/USBCapture-AQTime.pcapng           (already-known content)
+      ?? USB Capture/USBCapture-AQTime2.pcapng          (already-known content)
+      ?? USB Capture/USBCapture-AQTime3.pcapng          (true cold-boot, Sec. 1)
+      ?? USB Capture/USBCapture-AQTime4.pcapng          (fresh sweep, Sec. 3)
+      ?? ghidra_scripts/decompiled_PITG.c               (ruled out, not in
+        the real ST-133 call chain -- see prior session's compacted summary)
+    NOT committed yet -- the trigger-sequence fix is a real, tested,
+    evidence-backed improvement even though it alone didn't close the
+    frame-delivery gap; commit when the user asks, not proactively.
+  - Full test suite passes (9/9): `python -m unittest
+    spectro_suite.tests.test_st133 -v` (note: this repo's Python has no
+    pytest installed -- use unittest directly, or `python -m unittest
+    discover`).
+  - Scratchpad diagnostic scripts from this session (not committed, session-
+    temp directory, may not persist into a new session -- recreate from Sec.
+    2-4 above if needed): test_heartbeat.py, test_combined.py,
+    test_heartbeat_soak.py, check_status_regs.py, test_fixed_trigger.py,
+    test_immediate_read.py, test_verbose_trigger.py.
+  - Next action when resumed: ask the user whether to proceed with the wire-
+    level capture-diff investigation (Sec. 4) or take a different angle; do
+    not assume -- this was an open question when the session paused.
+================================================================================

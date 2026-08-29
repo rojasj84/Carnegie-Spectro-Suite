@@ -16,6 +16,17 @@ from spectro_suite.hardware.detectors.st133_usb import (
     REG_SELFTEST,
     REG_TEMPERATURE,
     REG_ACQ_TRIGGER,
+    REG_ACQ_POSTTRIGGER,
+    REG_ACQ_BUSY,
+    REG_ACQ_PRETRIGGER,
+    BUSY_POLL_COUNT,
+    REG_RECONFIG_BURST_A,
+    REG_RECONFIG_BURST_B,
+    REG_ARM_PREP,
+    REG_ARM_POST,
+    VR_ARM_PREP,
+    REG_HEARTBEAT_ECHO,
+    REG_HEARTBEAT_WALK,
     TEMP_REG_COLD_REFERENCE,
     TEMP_REG_COLD_TOLERANCE,
 )
@@ -60,6 +71,33 @@ class TestST133Driver(unittest.TestCase):
         self.assertEqual(REG_SELFTEST, 0x40)
         self.assertEqual(REG_TEMPERATURE, 0x46)
         self.assertEqual(REG_ACQ_TRIGGER, 0x14)
+        self.assertEqual(REG_ACQ_POSTTRIGGER, 0x32)
+
+    def test_trigger_sequence_matches_full_power_cycle_capture(self):
+        """
+        Verify the full first-trigger arming sequence matches
+        USBCapture-FullPowerCycle.pcapng (2026-08-29) exactly -- a genuine
+        CCD power-off + USB disconnect capture, through power-on/reconnect/
+        WinSpec32/one real acquisition (the only pixel completion in that
+        33,221-packet capture). Includes REG_ACQ_BUSY (0xE2) and
+        REG_ACQ_PRETRIGGER (0xE0), which an earlier same-day version had
+        removed based on USBCapture-AQTime4.pcapng alone -- that capture
+        turned out to only contain *repeat* triggers within an already-armed
+        session, not a true first connection.
+        """
+        self.assertEqual(REG_ACQ_BUSY, 0xE2)
+        self.assertEqual(REG_ACQ_PRETRIGGER, 0xE0)
+        self.assertEqual(BUSY_POLL_COUNT, 401)
+        self.assertEqual(
+            REG_RECONFIG_BURST_A,
+            [(0x30, 0), (0x30, 1), (0x30, 3), (0x00, 0), (0xFE, 0), (0x3C, 1)],
+        )
+        self.assertEqual(REG_ARM_PREP, [(0x14, 0x0100), (0x10, 4), (0x12, 0), (0x14, 1)])
+        self.assertEqual(VR_ARM_PREP, 0xF2)
+        self.assertEqual(REG_ARM_POST, [(0x16, 0)])
+        self.assertEqual(REG_RECONFIG_BURST_B, [(0x22, 0), (0x24, 1)])
+        self.assertEqual(REG_HEARTBEAT_ECHO, 0x40)
+        self.assertEqual(REG_HEARTBEAT_WALK, 0x4A)
 
     def test_bulk_protocol_no_winusb_returns_safely(self):
         """Bulk register read/write/frame-read must return None/False without a WinUSB handle, not raise."""

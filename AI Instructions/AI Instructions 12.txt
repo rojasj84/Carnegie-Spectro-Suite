@@ -1,0 +1,269 @@
+================================================================================
+ SPECTROSUITE: PRINCETON INSTRUMENTS ST-133 INGAAS CONTROLLER GUIDE (PART 12)
+================================================================================
+Document: AI Instructions 12.txt
+Target Audience: AI Coding Agents & Systems Engineers
+Project: Carnegie SpectroSuite (Python 3.12 / Modern 64-Bit Spectroscopy Software)
+Date: August 2026
+
+READ THIS FIRST, after Part 11. Part 11 left off with the register-level
+protocol confirmed byte-identical to a real working session, but frame
+delivery still failing, and a proposal to capture the 64-bit driver's own
+USB traffic for comparison. This part covers that capture, an external-AI
+second-opinion exercise, a MUCH more complete trigger sequence discovered via
+a genuine full CCD power-cycle capture, and the current, still-unresolved
+state after implementing and testing that complete sequence exhaustively.
+
+--------------------------------------------------------------------------------
+ 1. OUR OWN DRIVER'S CAPTURE: RULED OUT INTERFACE-BINDING DIFFERENCES
+--------------------------------------------------------------------------------
+Captured the 64-bit driver's own USB traffic (USB Capture/
+Local64_USBCapture-AQTime.pcapng) via USBPcap on the 64-bit machine while
+running a single connect() + 0.5s acquire_frame() attempt. Target device
+(1,5), identified by its known endpoint set [0x00,0x08,0x82,0x86].
+
+Findings:
+  - Standard enumeration (GET_DESCRIPTOR device, GET_DESCRIPTOR config,
+    SET_CONFIGURATION(1)) is BYTE-IDENTICAL to the real WinSpec32 session.
+    This directly disproves "WinUSB configures the interface differently" as
+    a general theory -- not just unlikely, actually checked and false.
+  - The WinUsb_ReadPipe(0x82) call completes with status=0xC0010000
+    (USBD_STATUS_CANCELED), not a STALL or device-reported error -- the
+    device simply never signals anything on 0x82, cleanly, in both driver
+    stacks equally (see Sec. "timing comparison" below: the real capture ALSO
+    has CANCELED events on 0x82, from WinSpec32's own idle/live-preview
+    polling between sweep steps -- confirmed benign via a large silent gap
+    immediately after each one, not a sign of failure).
+  - Precise real-time comparison (via pcap timestamps, not just packet
+    order): in the real capture, delay from trigger write to actual pixel
+    completion is essentially EXACTLY the exposure duration (0.1009s,
+    0.2010s, 0.5008s, 1.0008s measured for 0.1/0.2/0.5/1.0s settings -- only
+    1-8ms overhead). In our capture, the 0x82 read was posted ~7ms after the
+    theoretical "ready" instant, then timed out per the 500ms pipe policy.
+    HOWEVER this ~7ms-late theory was independently already falsified
+    earlier (Part 11, immediate-read test) -- posting the read immediately,
+    well before any possible readiness moment, with an extended timeout,
+    also produced nothing. So read-posting timing is not the answer.
+
+--------------------------------------------------------------------------------
+ 2. EXTERNAL AI SECOND OPINION -- FOUR HYPOTHESES, ALL DISPROVEN BY EVIDENCE
+--------------------------------------------------------------------------------
+The user asked a second AI for input (given a summary of the investigation).
+It proposed four hypotheses. All were checked directly against real capture
+data rather than dismissed as merely unlikely:
+
+  1. Unselected alternate setting -- checking the FULL (previously only
+     truncated-read) 76-byte config descriptor revealed a genuinely new fact:
+     the device has a SECOND alternate setting (interface 0, altsetting 1)
+     with 4 endpoints (0x82, 0x84, 0x86, 0x88, all bulk IN, no OUT endpoint)
+     that we'd never noticed. BUT: the entire real working session never
+     issues a single SET_INTERFACE request and never touches 0x84/0x88 --
+     it works entirely on the default Alt 0. Disproven directly.
+  2. wIndex/wLength mismatch on the EP0 0xF0 call -- already ruled out; we
+     replay that exact setup packet byte-for-byte, not just bRequest.
+  3. Unserviced interrupt endpoint -- disproven by the descriptor itself:
+     only one interface exists (bNumInterfaces=1), and every endpoint in
+     both alternate settings is bulk (bmAttributes=0x02). No interrupt
+     endpoint exists anywhere on this device.
+  4. Missing pipe/port reset URB from the KMDF driver -- disproven by
+     enumerating every distinct URB function code used across the ENTIRE
+     real session: SELECT_CONFIGURATION, CONTROL_TRANSFER,
+     BULK_OR_INTERRUPT_TRANSFER, GET_DESCRIPTOR_FROM_DEVICE, VENDOR_DEVICE.
+     No RESET_PIPE/ABORT_PIPE/SYNC_CLEAR_STALL/SELECT_INTERFACE appears
+     anywhere in the real session.
+
+A second round from the same AI proposed: (a) missing vendor-specific init
+IOCTLs from piusbwdf.sys's EvtDevicePrepareHardware, and (b) FX2 endpoint
+toggle/STALL reset via WinUsb_ResetPipe/AbortPipe before triggering.
+  - (a) was checked directly: the complete real URB function code inventory
+    (above) leaves no room for a hidden vendor IOCTL -- everything that
+    happens is already catalogued. BUT this prompted a genuinely useful
+    re-check of the true cold-boot capture's very first packets, which
+    surfaced a real SET_INTERFACE(altsetting=0) request (func=0x0001
+    URB_FUNCTION_SELECT_INTERFACE) immediately after SET_CONFIGURATION(1) in
+    USBCapture-AQTime3.pcapng -- present there but absent from AQTime4
+    (which apparently wasn't a true first bind). This IS real, standard USB
+    behavior (re-asserting Alt 0 also resets endpoint data-toggle state per
+    spec) that WinUsb_Initialize() never does automatically.
+  - (b)/the SET_INTERFACE finding was tested live: added an explicit
+    WinUsb_SetCurrentAlternateSetting(handle, 0) call right after
+    WinUsb_Initialize() in connect(). First attempt hung indefinitely --
+    switching alternate setting silently resets WinUSB's pipe policies
+    (including our 500ms timeout) back to OS defaults; fixed by re-applying
+    WinUsb_SetPipePolicy after the alt-setting call. Retested: STILL NO
+    FRAME. This hypothesis is now ruled out too, live-tested not just
+    theorized.
+
+--------------------------------------------------------------------------------
+ 3. THE BIG ONE: A GENUINE FULL POWER-CYCLE CAPTURE REVEALS A MUCH LARGER
+    REAL TRIGGER SEQUENCE
+--------------------------------------------------------------------------------
+The user did the most rigorous capture yet: USB Capture/
+USBCapture-FullPowerCycle.pcapng. Genuine CCD power-off, USB cable
+disconnected from the 32-bit PC, capture started BEFORE reconnecting
+anything, then: reconnect cable, power the detector back on, launch
+WinSpec32, connect, one real 1-second acquisition. 33,221 total packets,
+target device (3,10). This is the first capture that ever recorded a TRUE
+from-power-on session start.
+
+Critical finding: there is only ONE pixel-data completion in the entire
+33,221-packet capture (idx=33198) -- meaning nearly the WHOLE capture is
+real initialization/calibration traffic before the very first trigger. This
+directly explains why USBCapture-AQTime4.pcapng's "short" trigger sequence
+(Part 11, Sec. 3) never worked when we implemented it: AQTime4 must have
+started recording mid-session, after WinSpec32 had already done this entire
+elaborate first-time arming sequence once -- its 4 triggers were all
+*repeat* triggers within an already-armed session, which apparently uses a
+much shorter shortcut. Our own driver creates a brand-new WinUSB session on
+every connect() and has never gotten far enough to observe what a "warm"
+repeat trigger within our OWN session would need -- so the FULL sequence
+below should be used for every trigger until directly disproven.
+
+Also revealed in this capture:
+  - Device descriptor shows bNumConfigurations=2 (never noticed before) --
+    but GET_DESCRIPTOR(CONFIG, index=1) returns BYTE-IDENTICAL 76-byte
+    content to index 0 (same bConfigurationValue=1, same everything).
+    Functionally a dead end, not a real second mode.
+  - TWO DISTINCT "walking pattern" mechanisms exist on the bulk pipe, not
+    one, correcting a Part-11 claim: an elaborate BATCHED multi-step write
+    sequence to register 0x54 (triples like [0x01,0x54,0x00]+[0x02,val_lo,
+    val_hi]... in bursts of 6/12/15/18/78 bytes) that dominates for a long
+    stretch right after connect (confirmed in BOTH USBCapture-AQTime3.pcapng
+    and this capture -- Part 11's claim that "0x54 never appears" was based
+    on AQTime4 alone, which apparently started past this phase), and the
+    simpler ongoing walking pattern on 0x4A (single 6-byte writes cycling
+    0x0C/0x0E/etc.) that dominates steady-state activity afterward and
+    continues even after the 0x54 burst tapers off (both registers'
+    activity actually OVERLAPS for a long stretch -- 0x4A first appears at
+    idx=5109, 0x54 last appears at idx=15235, out of this capture's 33,221
+    total). The background heartbeat thread currently only replicates 0x4A,
+    not the 0x54 init burst.
+  - The COMPLETE real first-trigger arming sequence, extracted from
+    idx~31553-33198 (immediately following the tail of steady-state 0x4A
+    heartbeat activity):
+        1. WRITE 0x30=0, 0x30=1, 0x30=3, 0x00=0, 0xFE=0, 0x3C=1
+        2. [0x82 read request posted early -- WinSpec32/piusbwdf.sys arms
+           the pixel pipe well ahead of the actual trigger; not something we
+           can literally replicate with a blocking WinUsb_ReadPipe call, see
+           Sec. 4]
+        3. WRITE 0x14=0x0100 (256 -- NOT the trigger value of 1), WRITE
+           0x10=4 (NEW register, never seen before), WRITE 0x12=0 (NEW),
+           WRITE 0x14=1 (a second, different write to the same register)
+        4. EP0 vendor OUT: bRequest=0xF2, RequestType=0x40, wValue=0x0200
+           (512), wIndex=0, 8-byte zero payload -- THIS IS THE SAME bRequest
+           first flagged as "never decoded further" all the way back in the
+           original Part-10 capture (where only 2 occurrences were seen,
+           unexplained). Now seen in full context for the first time.
+        5. WRITE 0x16=0 (NEW register)
+        6. WRITE 0x22=0, WRITE 0x24=1
+        7. READ 0xE2 (REG_ACQ_BUSY) x 401, tightly back-to-back, ~45ms real
+           elapsed time (measured via pcap timestamps: t=32.5715s to
+           t=32.6166s), ALWAYS reading 0. This is the ORIGINAL Part-10
+           register that was REMOVED in Part 11 based on AQTime4 showing
+           zero occurrences -- that removal was wrong; AQTime4 just never
+           captured a session needing it.
+        8. READ 0xE0 (REG_ACQ_PRETRIGGER) once -- reads 0
+        9. EP0 vendor OUT bRequest=0xF0 (the arm call known since Part 10/11)
+        10. WRITE 0x14=1 -- the REAL trigger
+        11. READ 0x32 (REG_ACQ_POSTTRIGGER) -- reads 0
+        12. Pixel data arrives on 0x82 (1024 bytes)
+
+--------------------------------------------------------------------------------
+ 4. IMPLEMENTED AND TESTED -- STILL NO FRAME, EVEN NOW
+--------------------------------------------------------------------------------
+st133_usb.py was rewritten to match this exactly (uncommitted as of this
+writing -- see Sec. 6):
+  - New constants: REG_ACQ_BUSY (0xE2, restored), REG_ACQ_PRETRIGGER (0xE0,
+    restored), BUSY_POLL_COUNT=401, REG_RECONFIG_BURST_A/B (split around the
+    new arming steps), REG_ARM_PREP, REG_ARM_POST, VR_ARM_PREP=0xF2.
+  - New _ep0_vendor_call(b_request, w_value) helper (generalizes the old
+    _ep0_arm_call to cover both 0xF0 and 0xF2).
+  - _trigger_acquisition() rewritten to send the full 12-step sequence above,
+    in order, as one atomic unit under the bulk lock.
+  - test_st133.py updated: test_trigger_sequence_matches_full_power_cycle_capture
+    replaces the old (now-wrong) test_trigger_sequence_matches_fresh_capture.
+    Full suite (9 tests) passes.
+
+Live-tested against real hardware multiple ways:
+  - acquire_frame() with the new sequence: NO FRAME.
+  - A fully verbose test printing every single step's ACK status and every
+    readback value: every write ok=True, EP0 0xF2 call ok=True/err=0, the
+    401x 0xE2 poll loop completes in 0.051s (real capture: 0.045s -- matches
+    closely) with all-zero readbacks (matches real capture exactly), 0xE0
+    reads 0 (matches), EP0 0xF0 arm ok=True/err=0, trigger write ok=True,
+    0x32 reads 0 (matches). WinUsb_ReadPipe(0x82) STILL returns nothing.
+
+CONCLUSION: this is now the most complete, most rigorously verified
+replication of the real protocol possible from packet-content analysis --
+byte-for-byte, value-for-value, and even timing-for-timing matched to a
+capture that spans a genuine physical power cycle through to a real
+successful acquisition. It still does not produce a frame via WinUSB. This
+is strong evidence that NOTHING further can be learned by extracting more
+detail from more captures -- the remaining gap is not "we're missing a
+command" but something structural, likely below the URB/packet-content layer
+entirely (host controller driver / DMA scheduling differences between a
+WinUSB-bound device and a KMDF-bound one) that USBPcap cannot show.
+
+--------------------------------------------------------------------------------
+ 5. WHERE TO GO NEXT (proposed, not yet started -- user chose to stop for
+    this session rather than pick one)
+--------------------------------------------------------------------------------
+Three options were presented to the user at the point this session ended:
+  1. Capture the 64-bit driver's own attempt AGAIN, now running this much
+     more complete sequence (more surface area: the 401 busy-polls, the
+     0xF2 call) -- diff against the real capture one more time, specifically
+     watching for header-level differences (status codes, timing) rather
+     than content, since content is now proven identical.
+  2. Consider that this may be a genuine limit of what WinUSB can do for
+     this device class, and research either a 64-bit-compatible KMDF driver
+     equivalent to piusbwdf.sys, or contact Princeton Instruments/Teledyne
+     for 64-bit driver support or protocol documentation.
+  3. Stop and pick this up fresh next session. <-- USER CHOSE THIS.
+
+--------------------------------------------------------------------------------
+ 6. CURRENT STATE / RESUME HERE
+--------------------------------------------------------------------------------
+  - Session ended by explicit user request ("stop here for this session")
+    after the exhaustive live-hardware verification in Sec. 4 above. No live
+    hardware test was left in progress.
+  - Uncommitted changes as of this writing (git status):
+      M spectro_suite/hardware/detectors/st133_usb.py  (Sec. 3/4: the full
+        real trigger sequence, REG_ACQ_BUSY/PRETRIGGER restored, new
+        REG_ARM_PREP/POST/REG_RECONFIG_BURST_A/B constants, VR_ARM_PREP,
+        _ep0_vendor_call helper)
+      M spectro_suite/tests/test_st133.py  (new test for the full sequence)
+      ?? AI Instructions/AI Instructions 11.txt
+      ?? USB Capture/Local64_USBCapture-AQTime.pcapng  (Sec. 1, our own
+        driver's captured attempt)
+      ?? USB Capture/USBCapture-AQTime.pcapng
+      ?? USB Capture/USBCapture-AQTime2.pcapng
+      ?? USB Capture/USBCapture-AQTime3.pcapng
+      ?? USB Capture/USBCapture-AQTime4.pcapng
+      ?? USB Capture/USBCapture-FullPowerCycle.pcapng  (Sec. 3, the big one)
+      ?? ghidra_scripts/decompiled_PITG.c  (ruled out, unrelated)
+    NOT committed yet -- commit when the user asks, not proactively. This is
+    a real, well-evidenced, and far more complete implementation of the real
+    protocol than any prior version, even though frame delivery is still not
+    achieved.
+  - Full test suite passes (9/9): `python -m unittest
+    spectro_suite.tests.test_st133 -v` (no pytest installed in this repo's
+    Python -- use unittest directly).
+  - IMPORTANT CORRECTION to internalize before doing further analysis: ANY
+    future capture must be checked for whether it captures a TRUE first
+    connection or a repeat-trigger-within-an-existing-session -- these two
+    cases use VISIBLY DIFFERENT command sequences (Sec. 3's full sequence vs.
+    Part 11's short one), and conflating them was the root cause of Part
+    11's incorrect "0xE2/0xE0 don't exist" conclusion. The number of pixel
+    completions vs. total packet count in a capture is a quick way to tell
+    them apart (one-pixel-completion-near-the-end = true first connection;
+    multiple pixel completions spread through a shorter capture = repeat
+    triggers in an already-warm session).
+  - Scratchpad diagnostic scripts from this session (not committed, may not
+    persist into a new session -- recreate from Sec. 1-4 above if needed):
+    test_for_capture.py, test_set_interface.py, test_full_sequence.py,
+    test_full_sequence_verbose.py, plus various one-off pcap-analysis
+    scripts used inline via Bash (not saved as files).
+  - Next action when resumed: present the three options from Sec. 5 again
+    (or let the user propose something new) -- do not assume which to
+    pursue.
+================================================================================

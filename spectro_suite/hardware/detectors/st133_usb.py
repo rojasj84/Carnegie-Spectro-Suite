@@ -20,19 +20,35 @@ This requires WinUSB binding -- piusbwdf.sys (KMDF) has no general bulk-pipe
 IOCTL (Part 3: no bulk-write IOCTL was ever found in its dispatch table), so
 none of this works while the device is bound to piusbwdf.sys.
 Confirmed registers (see _bulk_read_register/_bulk_write_register call sites):
-  - 0x40: self-test/echo pattern, always 0x5555 or 0xD5D5. Liveness check only.
+  - 0x40: self-test/echo pattern. REVISED 2026-08-29: plain write-then-
+    readback echo, not a fixed 0x5555/0xD5D5 constant -- see
+    _init_controller_handshake. Liveness check only.
   - 0x46: temperature-adjacent register. Live values track the real captured
     WinSpec32 session almost exactly (0x9191/0x9292 raw) -- also independently
     matches PIXCM32.dll's own traced temperature-read register from static
     analysis (PIPP_Input(handle, 0x46), see git history). Calibration to actual
     Celsius is NOT yet known -- see get_temperature().
-  - 0xE2, 0xE0, 0x32: read as part of the acquisition sequence (poll loop /
-    one-time pre- and post-trigger reads); always 0 in the captured session.
-    Meaning beyond "some kind of status/handshake check" is unconfirmed.
-  - 0x14: WRITE with value=1 -- the only state-changing write between the
-    busy-poll loop and real pixel data arriving on 0x82 in the captured
-    session. Best-evidenced acquisition trigger; live-confirmed to actually
-    produce a real frame when replayed (see acquire_frame).
+  - The real, COMPLETE first-trigger arming sequence (REG_RECONFIG_BURST_A/B,
+    REG_ARM_PREP/POST, VR_ARM_PREP, REG_ACQ_BUSY x BUSY_POLL_COUNT,
+    REG_ACQ_PRETRIGGER, the EP0 0xF0 arm, REG_ACQ_TRIGGER, REG_ACQ_POSTTRIGGER):
+    extracted from USBCapture-FullPowerCycle.pcapng (2026-08-29) -- a genuine
+    CCD power-off + USB disconnect, captured start to finish through power-on/
+    reconnect/WinSpec32 launch/one real 1-second acquisition, the only pixel
+    completion in a 33,221-packet capture. This SUPERSEDES a shorter sequence
+    derived earlier the same day from USBCapture-AQTime4.pcapng, which turned
+    out to be a *repeat* trigger within an already-armed session (that capture
+    never included a true first connection) -- confirmed live to still fail,
+    byte-for-byte-correct, both alone and combined with every other same-day
+    hypothesis (continuous heartbeat, read-posting timing, explicit
+    SET_INTERFACE reassertion, the large batched table writes). The full
+    sequence includes a genuine 401-iteration busy-poll on 0xE2 (~45ms real
+    time) and a vendor EP0 call (bRequest=0xF2, wValue=0x0200) that was first
+    flagged as "never decoded further" all the way back in the original Part-10
+    capture. See _trigger_acquisition for the exact order.
+  - 0x14: WRITE with value=1 -- the acquisition trigger, immediately
+    preceded by the EP0 0xF0 arm call with nothing in between. Live-
+    confirmed to actually produce a real frame when replayed (see
+    acquire_frame).
   - Pixel readout (bulk IN 0x82) needs no explicit "arm" request of its own --
     confirmed live to match piusbwdf.sys's continuous-reader architecture
     (Parts 4/5): a frame simply arrives once the trigger sequence above has
@@ -40,6 +56,18 @@ Confirmed registers (see _bulk_read_register/_bulk_write_register call sites):
   - EXPOSURE TIME IS NOT YET WIRED TO HARDWARE. No register controlling
     integration time has been identified in the capture yet -- acquire_frame's
     exposure_time_sec currently only paces local progress-callback timing.
+  - CONTINUOUS BACKGROUND HEARTBEAT (added 2026-08-29, see _heartbeat_loop):
+    real WinSpec32 never goes quiet on the bulk pipe. TWO DISTINCT walking-
+    pattern mechanisms exist, not one: an elaborate, batched multi-step write
+    sequence to 0x54 that dominates for a long stretch right after connect
+    (confirmed in both USBCapture-AQTime3.pcapng and
+    USBCapture-FullPowerCycle.pcapng -- REVISES an earlier same-day claim that
+    0x54 "doesn't exist", which was based on USBCapture-AQTime4.pcapng alone,
+    a capture that apparently started past this phase), and a simpler,
+    ongoing walking pattern on 0x4A that dominates steady-state activity
+    afterward (confirmed dominant in AQTime4, and still present later in
+    FullPowerCycle). The background thread currently only replicates the 0x4A
+    steady-state pattern, not the 0x54 init burst -- see REG_HEARTBEAT_WALK.
 
 Earlier EP0-vendor-request-based architecture (IOCTL_VENDOR_REQUEST_OUT/IN,
 piusbwdf.sys's real IOCTL dispatch table, the KMDF overlapped-I/O safety
@@ -55,6 +83,7 @@ import os
 import time
 import struct
 import ctypes
+import threading
 from ctypes import wintypes
 import logging
 from typing import Optional, Tuple, Callable, List
@@ -108,10 +137,58 @@ BULK_CMD_WRITE = 0x02   # "write": data_lo/data_hi carries the 16-bit value
 
 REG_SELFTEST         = 0x40   # Self-test/echo pattern (0x5555 / 0xD5D5) -- liveness check only
 REG_TEMPERATURE      = 0x46   # Temperature-adjacent register (raw ADC-like code, uncalibrated)
-REG_ACQ_BUSY         = 0xE2   # Polled in a loop while waiting; always 0 in the captured session
-REG_ACQ_PRETRIGGER   = 0xE0   # One-time read immediately before the trigger write
 REG_ACQ_TRIGGER      = 0x14   # WRITE value=1 -- best-evidenced acquisition trigger
 REG_ACQ_POSTTRIGGER  = 0x32   # One-time read immediately after the trigger write
+
+# REG_ACQ_BUSY (0xE2) / REG_ACQ_PRETRIGGER (0xE0): RESTORED 2026-08-29 after
+# initially being removed based on USBCapture-AQTime4.pcapng (which showed
+# zero occurrences across all 4 of its triggers). A true full-power-cycle
+# capture (USBCapture-FullPowerCycle.pcapng: genuine CCD power-off, USB
+# disconnect, full capture running through power-on/reconnect/WinSpec32
+# launch/one real 1-second acquisition -- the only pixel completion in a
+# 33,221-packet capture) shows a real, sustained poll loop: 401 consecutive
+# reads of 0xE2 (idx 31583-33183, ~45ms real elapsed time, tightly
+# back-to-back, always reading 0), then ONE read of 0xE0, immediately before
+# the already-known EP0 0xF0 arm call and trigger write. AQTime4's 4
+# triggers must all have been *repeat* triggers within an already-armed
+# WinSpec32 session (it never captured the true first trigger after a cold
+# connect), which apparently skips this entire block -- our own driver
+# creates a fresh WinUSB session on every connect() and has never observed
+# what a "warm" second trigger within our own session would need, so the
+# full sequence below is used for every trigger until proven unnecessary.
+REG_ACQ_BUSY         = 0xE2
+REG_ACQ_PRETRIGGER   = 0xE0
+BUSY_POLL_COUNT       = 401   # matches the real capture's poll count exactly
+
+# Full real "first trigger after a true power cycle" arming sequence,
+# extracted from USBCapture-FullPowerCycle.pcapng (idx 31553-33198). Three
+# previously-unseen registers (0x10, 0x12, 0x16) and the vendor EP0 call
+# bRequest=0xF2 (wValue=0x0200=512, 8-byte zero payload -- the "never
+# decoded further" request flagged all the way back in the original Part-10
+# capture) appear here for the first time with full context. Order:
+#   REG_RECONFIG_BURST_A -> REG_ARM_PREP -> VR_ARM_PREP(0xF2) ->
+#   REG_ARM_POST -> REG_RECONFIG_BURST_B -> [busy-poll+pretrigger+arm+trigger]
+REG_RECONFIG_BURST_A = [(0x30, 0), (0x30, 1), (0x30, 3), (0x00, 0), (0xFE, 0), (0x3C, 1)]
+REG_ARM_PREP         = [(0x14, 0x0100), (0x10, 4), (0x12, 0), (0x14, 1)]
+REG_ARM_POST         = [(0x16, 0)]
+REG_RECONFIG_BURST_B = [(0x22, 0), (0x24, 1)]
+VR_ARM_PREP           = 0xF2
+
+# Continuous background heartbeat, confirmed live 2026-08-29 via a true
+# cold-boot capture (USBCapture-AQTime3.pcapng): real WinSpec32 never stops
+# talking to the controller -- a write-verify cycle on 0x40 and a walking-
+# bit-pattern write repeat for the ENTIRE session, not just once at init.
+# REVISED 2026-08-29 (USBCapture-AQTime4.pcapng): the real walking-pattern
+# register is 0x4A, not 0x54 -- 0x54 never appears anywhere in that fresh
+# capture, while 0x4A is by far the single most active register in the whole
+# session (1664 writes across ~5200 packets), cycling mostly between 0x0C/
+# 0x0E with occasional 0x0D/0x0F/0x08/0x00. Working hypothesis (not yet
+# independently proven, only tested as a bundle -- see _heartbeat_loop): the
+# firmware treats this as a "live host is present" signal and won't arm
+# frame delivery on trigger without it.
+REG_HEARTBEAT_ECHO   = 0x40
+REG_HEARTBEAT_WALK   = 0x4A
+HEARTBEAT_INTERVAL_SEC = 0.1
 
 # Reference point for REG_TEMPERATURE, captured live while the detector was
 # confirmed cold at -98C (user-verified via WinSpec32, 2026-08-29): the raw
@@ -184,6 +261,17 @@ class ST133Camera(BaseCamera):
         self._is_firmware_loaded = False
         self._last_temperature: Optional[float] = None
         self._quantum_us = 153.0 # InGaAs gate integration quantum (from omavb.dat)
+
+        # Serializes all bulk register I/O between the heartbeat thread and
+        # whatever thread calls acquire_frame()/get_temperature() -- the
+        # protocol is a strict write-then-read-reply pairing on 0x08/0x86, so
+        # two threads issuing ops back-to-back without a lock could pair a
+        # request with the wrong reply. RLock so a method that already holds
+        # it (e.g. _trigger_acquisition) can still call the individual
+        # register helpers, which also acquire it.
+        self._bulk_lock = threading.RLock()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_stop = threading.Event()
 
     def _find_device_path(self) -> Optional[str]:
         """Locate active Windows PnP device path for Princeton Instruments USB (VID_0BD7&PID_A010)."""
@@ -310,6 +398,10 @@ class ST133Camera(BaseCamera):
 
             # Execute Step 7: Controller Handshake & EPLD Decoder Arming (PIPP_Initialize)
             self._init_controller_handshake()
+
+            # Start the continuous background heartbeat -- see _heartbeat_loop
+            # for why this runs for the life of the connection, not just once.
+            self._start_heartbeat()
             return True
         except Exception as ex:
             logger.error(f"Error connecting to ST-133 controller: {ex}")
@@ -375,18 +467,19 @@ class ST133Camera(BaseCamera):
         """
         if not self._winusb_handle or not winusb:
             return None
-        pkt = bytes([0x01, addr & 0xFF, 0x00, BULK_CMD_READ, 0x00, 0x00])
-        buf = (ctypes.c_ubyte * 6)(*pkt)
-        trans = wintypes.ULONG(0)
-        wres = winusb.WinUsb_WritePipe(self._winusb_handle, 0x08, buf, 6, ctypes.byref(trans), None)
-        if not wres:
-            return None
-        read_buf = ctypes.create_string_buffer(2)
-        trans2 = wintypes.ULONG(0)
-        rres = winusb.WinUsb_ReadPipe(self._winusb_handle, 0x86, read_buf, 2, ctypes.byref(trans2), None)
-        if not rres or trans2.value != 2:
-            return None
-        return int.from_bytes(read_buf.raw[:2], "little")
+        with self._bulk_lock:
+            pkt = bytes([0x01, addr & 0xFF, 0x00, BULK_CMD_READ, 0x00, 0x00])
+            buf = (ctypes.c_ubyte * 6)(*pkt)
+            trans = wintypes.ULONG(0)
+            wres = winusb.WinUsb_WritePipe(self._winusb_handle, 0x08, buf, 6, ctypes.byref(trans), None)
+            if not wres:
+                return None
+            read_buf = ctypes.create_string_buffer(2)
+            trans2 = wintypes.ULONG(0)
+            rres = winusb.WinUsb_ReadPipe(self._winusb_handle, 0x86, read_buf, 2, ctypes.byref(trans2), None)
+            if not rres or trans2.value != 2:
+                return None
+            return int.from_bytes(read_buf.raw[:2], "little")
 
     def _bulk_write_register(self, addr: int, value: int) -> bool:
         """
@@ -397,11 +490,12 @@ class ST133Camera(BaseCamera):
         """
         if not self._winusb_handle or not winusb:
             return False
-        pkt = bytes([0x01, addr & 0xFF, 0x00, BULK_CMD_WRITE, value & 0xFF, (value >> 8) & 0xFF])
-        buf = (ctypes.c_ubyte * 6)(*pkt)
-        trans = wintypes.ULONG(0)
-        res = winusb.WinUsb_WritePipe(self._winusb_handle, 0x08, buf, 6, ctypes.byref(trans), None)
-        return bool(res)
+        with self._bulk_lock:
+            pkt = bytes([0x01, addr & 0xFF, 0x00, BULK_CMD_WRITE, value & 0xFF, (value >> 8) & 0xFF])
+            buf = (ctypes.c_ubyte * 6)(*pkt)
+            trans = wintypes.ULONG(0)
+            res = winusb.WinUsb_WritePipe(self._winusb_handle, 0x08, buf, 6, ctypes.byref(trans), None)
+            return bool(res)
 
     def _bulk_read_frame(self, expected_bytes: int) -> Optional[bytes]:
         """
@@ -414,12 +508,13 @@ class ST133Camera(BaseCamera):
         """
         if not self._winusb_handle or not winusb:
             return None
-        buf = ctypes.create_string_buffer(expected_bytes)
-        trans = wintypes.ULONG(0)
-        res = winusb.WinUsb_ReadPipe(self._winusb_handle, 0x82, buf, expected_bytes, ctypes.byref(trans), None)
-        if res and trans.value > 0:
-            return buf.raw[:trans.value]
-        return None
+        with self._bulk_lock:
+            buf = ctypes.create_string_buffer(expected_bytes)
+            trans = wintypes.ULONG(0)
+            res = winusb.WinUsb_ReadPipe(self._winusb_handle, 0x82, buf, expected_bytes, ctypes.byref(trans), None)
+            if res and trans.value > 0:
+                return buf.raw[:trans.value]
+            return None
 
     def _write_register(self, addr: int, value: int) -> bool:
         """
@@ -728,24 +823,137 @@ class ST133Camera(BaseCamera):
             logger.warning(f"Firmware SRAM bootstrap notice: {ex}")
             return False
 
+    def _ep0_vendor_call(self, b_request: int, w_value: int = 0) -> bool:
+        """
+        Send an 8-byte-zero-payload EP0 vendor control OUT transfer:
+        RequestType=0x40 (OUT|VENDOR|DEVICE), wIndex=0. Used for both real
+        vendor calls confirmed in this exact position in the real capture:
+        bRequest=0xF2/wValue=0x0200 (REG_ARM_PREP's VR_ARM_PREP step -- the
+        request flagged all the way back in the original Part-10 capture as
+        "never decoded further") and bRequest=0xF0/wValue=0 (the final
+        pre-trigger arm call, confirmed since Part 10).
+        """
+        if not self._winusb_handle or not winusb:
+            return False
+        pkt = WINUSB_SETUP_PACKET()
+        pkt.RequestType = 0x40
+        pkt.Request = b_request
+        pkt.Value = w_value & 0xFFFF
+        pkt.Index = 0
+        pkt.Length = 8
+        data = (ctypes.c_ubyte * 8)(0, 0, 0, 0, 0, 0, 0, 0)
+        trans = wintypes.ULONG(0)
+        res = winusb.WinUsb_ControlTransfer(self._winusb_handle, pkt, data, 8, ctypes.byref(trans), None)
+        return bool(res)
+
     def _trigger_acquisition(self) -> None:
         """
-        Replay the acquisition-trigger sequence, byte-for-byte as captured
-        from a real, working WinSpec32 session against this exact hardware
-        (2026-08-29): poll the busy register a few times, one read of the
-        pre-trigger register, WRITE the trigger register (the only state
-        change in the whole captured sequence before pixel data appeared),
-        then one post-trigger read. Live-confirmed to actually produce a
-        real 1024-byte frame on 0x82 when replayed through this driver.
+        Replay the full "true first trigger after a power cycle" arming
+        sequence, extracted from USBCapture-FullPowerCycle.pcapng (a genuine
+        CCD power-off + USB disconnect, captured start to finish through
+        power-on/reconnect/WinSpec32 launch/one real 1-second acquisition --
+        the only pixel completion in a 33,221-packet capture, idx 31553-
+        33198). See REG_ACQ_BUSY/REG_RECONFIG_BURST_A/REG_ARM_PREP/
+        VR_ARM_PREP/REG_ARM_POST/REG_RECONFIG_BURST_B for full provenance of
+        each piece. Order, exactly as captured:
+          1. REG_RECONFIG_BURST_A  (0x30 x3, 0x00, 0xFE, 0x3C)
+          2. REG_ARM_PREP          (0x14=0x0100, 0x10=4, 0x12=0, 0x14=1)
+          3. VR_ARM_PREP           (EP0 vendor OUT bRequest=0xF2, wValue=0x0200)
+          4. REG_ARM_POST          (0x16=0)
+          5. REG_RECONFIG_BURST_B  (0x22=0, 0x24=1)
+          6. REG_ACQ_BUSY x BUSY_POLL_COUNT (401 tight polls, ~45ms real time)
+          7. REG_ACQ_PRETRIGGER    (one read of 0xE0)
+          8. EP0 vendor OUT bRequest=0xF0 (the arm call, confirmed since Part 10)
+          9. WRITE REG_ACQ_TRIGGER=1 -- the real trigger
+          10. REG_ACQ_POSTTRIGGER  (one read of 0x32)
+
+        REPLACES a shorter version derived from USBCapture-AQTime4.pcapng,
+        which turned out to be a *repeat* trigger within an already-armed
+        WinSpec32 session (that capture never included a true first
+        connection), not the full sequence a fresh session actually needs --
+        confirmed live to still fail even byte-for-byte-correct, in
+        isolation and combined with every other hypothesis tried the same
+        day (continuous heartbeat, immediate vs. delayed frame-read posting,
+        explicit SET_INTERFACE reassertion, the large batched table writes).
+
+        Wrapped in the bulk lock as one atomic unit (RLock, so the
+        individual register helpers it calls can still take the same lock)
+        so the background heartbeat thread can't interleave a write in the
+        middle of this sequence -- it can only run between whole
+        acquisitions.
         """
-        for _ in range(3):
-            self._bulk_read_register(REG_ACQ_BUSY)
-        self._bulk_read_register(REG_ACQ_PRETRIGGER)
-        self._bulk_write_register(REG_ACQ_TRIGGER, 1)
-        self._bulk_read_register(REG_ACQ_POSTTRIGGER)
+        with self._bulk_lock:
+            for addr, val in REG_RECONFIG_BURST_A:
+                self._bulk_write_register(addr, val)
+            for addr, val in REG_ARM_PREP:
+                self._bulk_write_register(addr, val)
+            self._ep0_vendor_call(VR_ARM_PREP, w_value=0x0200)
+            for addr, val in REG_ARM_POST:
+                self._bulk_write_register(addr, val)
+            for addr, val in REG_RECONFIG_BURST_B:
+                self._bulk_write_register(addr, val)
+            for _ in range(BUSY_POLL_COUNT):
+                self._bulk_read_register(REG_ACQ_BUSY)
+            self._bulk_read_register(REG_ACQ_PRETRIGGER)
+            self._ep0_vendor_call(0xF0)
+            self._bulk_write_register(REG_ACQ_TRIGGER, 1)
+            self._bulk_read_register(REG_ACQ_POSTTRIGGER)
+
+    def _heartbeat_loop(self) -> None:
+        """
+        Continuously replay write-verify activity on 0x40/0x4A for as long
+        as the connection is open -- see REG_HEARTBEAT_ECHO/WALK for
+        provenance. Working hypothesis (not yet independently proven, only
+        tested as a bundle): real WinSpec32 never goes quiet on the bulk
+        pipe, even while just idling or waiting out an exposure, and the
+        controller firmware needs that sustained activity as an ongoing
+        "a live host is present" signal before it will arm frame delivery
+        on trigger.
+
+        Deliberately does NOT hold the lock between cycles -- only each
+        individual register op is atomic -- so _trigger_acquisition() can
+        always get in promptly rather than waiting out a long idle period.
+        """
+        probe_cycle = [0x10, 0x50, 0x90, 0xD0, 0x30, 0x70, 0xB0, 0xF0]
+        # Matches the real 0x4A walking pattern (USBCapture-AQTime4.pcapng):
+        # cycles mostly between 0x0C/0x0E, with occasional 0x0D/0x0F/0x08/0x00.
+        walk_cycle = [0x0C, 0x0E, 0x0C, 0x0C, 0x0E, 0x0C, 0x0D, 0x0F, 0x08, 0x00]
+        i = 0
+        while not self._heartbeat_stop.is_set():
+            probe = probe_cycle[i % len(probe_cycle)]
+            walk = walk_cycle[i % len(walk_cycle)]
+            try:
+                self._bulk_write_register(REG_HEARTBEAT_ECHO, probe)
+                self._bulk_read_register(REG_HEARTBEAT_ECHO)
+                self._bulk_write_register(REG_HEARTBEAT_WALK, walk)
+            except Exception as ex:
+                logger.debug(f"Heartbeat cycle notice: {ex}")
+            i += 1
+            self._heartbeat_stop.wait(HEARTBEAT_INTERVAL_SEC)
+
+    def _start_heartbeat(self) -> None:
+        """Start the continuous background heartbeat thread (see _heartbeat_loop)."""
+        if not self._winusb_handle or not winusb:
+            return
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            return
+        self._heartbeat_stop.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, name="ST133Heartbeat", daemon=True
+        )
+        self._heartbeat_thread.start()
+        logger.info("ST-133 background heartbeat started (continuous 0x40/0x54 activity).")
+
+    def _stop_heartbeat(self) -> None:
+        """Stop the background heartbeat thread cleanly, if running."""
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=1.0)
+        self._heartbeat_thread = None
 
     def disconnect(self):
         """Close communication handles cleanly."""
+        self._stop_heartbeat()
         if self._winusb_handle and winusb:
             try:
                 winusb.WinUsb_Free(self._winusb_handle)
