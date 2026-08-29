@@ -318,18 +318,26 @@ class ST133Camera(BaseCamera):
 
     def _init_controller_handshake(self) -> bool:
         """
-        Lightweight liveness check using the real bulk-pipe protocol: read the
-        self-test/echo register (0x40), confirmed both from a captured real
-        WinSpec32 session and a live replay through this driver (2026-08-29)
-        to always return one of two fixed bit patterns (0x5555 / 0xD5D5).
+        Lightweight liveness check using the real bulk-pipe protocol.
+
+        REVISED 2026-08-29 (true cold-boot capture): register 0x40 is NOT a
+        fixed self-test constant -- it's a plain write-then-readback ECHO
+        register. A genuine cold-boot capture showed WinSpec32 writing an
+        arbitrary byte (e.g. 0x90) and reading it back doubled (0x9090), then
+        writing 0x10 and reading back 0x1010, etc. The earlier "always
+        0x5555/0xD5D5" belief was an artifact of those specific bytes being
+        whatever WinSpec had last written there in prior sessions, not a
+        hardware-fixed pattern -- comparing against them literally caused a
+        real false-negative right after a physical power cycle (the register
+        read back 0 -- a real value, just not one we recognized).
 
         REPLACES an earlier, longer "handshake" that wrote registers 0x22/
         0x23/0x24/0x26 over EP0 vendor requests (PICM_Create_controller /
         PISCC_CreateCommunicationObject theory). That whole approach is now
         known to be unnecessary: acquire_frame() and get_temperature() were
         confirmed live to work correctly via the bulk protocol with NO
-        handshake beforehand at all. This check is now purely informational
-        and does NOT gate connect()'s success -- a device that isn't yet on
+        handshake beforehand at all. This check is purely informational and
+        does NOT gate connect()'s success -- a device that isn't yet on
         WinUSB (still piusbwdf.sys-bound, no bulk-pipe access) just fails
         this check harmlessly; connect() still succeeds either way, since
         WinUSB binding is what actually determines whether the bulk protocol
@@ -340,12 +348,15 @@ class ST133Camera(BaseCamera):
             return False
 
         try:
+            probe = 0x5A  # arbitrary, distinguishable from a stale/zero readback
+            wrote = self._bulk_write_register(REG_SELFTEST, probe)
             val = self._bulk_read_register(REG_SELFTEST)
-            ok = val in (0x5555, 0xD5D5)
+            expected = probe | (probe << 8)
+            ok = wrote and val == expected
             if ok:
-                logger.info(f"ST-133 self-test register (0x{REG_SELFTEST:02X}) responded: 0x{val:04X} -- bulk-pipe protocol live.")
+                logger.info(f"ST-133 echo register (0x{REG_SELFTEST:02X}) round-tripped 0x{probe:02X} correctly -- bulk-pipe protocol live.")
             else:
-                logger.debug(f"ST-133 self-test register did not respond as expected (got {val!r}).")
+                logger.debug(f"ST-133 echo register did not round-trip as expected (wrote 0x{probe:02X}, got {val!r}).")
             return ok
         except Exception as ex:
             logger.warning(f"Controller handshake notice: {ex}")
