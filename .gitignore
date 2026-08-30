@@ -37,3 +37,9 @@ ENV/
 # Local app settings / temp logs
 config/app_settings.json
 *.log
+
+# Bulky reverse-engineering scratch (regenerable from the pcaps; kept on disk,
+# not in git). See IN_PROGRESS.md.
+USB Capture/analysis/
+pcap_summary_for_claude.md
+generate_pcap_summary.py

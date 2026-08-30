@@ -19,6 +19,13 @@ dependencies = [
 windows = [
     "pywin32>=306",
 ]
+# Princeton Instruments ST-133 / OMA-V InGaAs over libusbK (the only 64-bit
+# transport that delivers pixel frames -- see IN_PROGRESS.md). Device must be
+# bound to the libusbK driver via Zadig.
+st133 = [
+    "pyusb>=1.2",
+    "libusb-package>=1.0.26",
+]
 
 [project.scripts]
 spectro-suite = "spectro_suite.cli:main"

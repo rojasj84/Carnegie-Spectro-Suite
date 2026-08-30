@@ -4,6 +4,25 @@ Native 64-Bit Hardware Driver for Princeton Instruments ST-133 InGaAs Detectors.
 Controls Princeton Instruments ST-133 / OMA-V linear InGaAs detectors on 64-bit
 Windows 10/11 through direct kernel communication over USB.
 
+########################################################################
+# TRANSPORT REALITY (2026-08-30) -- READ THIS FIRST
+#
+# WinUSB CANNOT deliver pixel frames from this controller. The bulk-IN
+# pixel pipe 0x82 stays 100% silent under WinUSB no matter what -- single
+# read, pre-armed overlapped read, 4x 512-byte continuous-reader pool,
+# RAW_IO, infinite timeout, full cold-boot init replay: not one byte.
+# Proven by swapping the device to the libusbK driver (Zadig) and running
+# the identical command sequence through pyusb/libusb-1.0 -- frames come
+# back immediately and reproducibly. So:
+#
+#   * WORKING 64-bit acquisition path  ->  st133_libusb.py  (pyusb + libusbK)
+#   * THIS file (WinUSB)               ->  register I/O + setpoint readback
+#                                          ONLY; acquire_frame() will not
+#                                          get a frame on WinUSB.
+#
+# See IN_PROGRESS.md at the repo root for the full current state.
+########################################################################
+
 THE REAL PROTOCOL (confirmed 2026-08-29 via a live Wireshark/USBPcap capture of
 the original 32-bit WinSpec32 software talking to this exact hardware unit,
 VID_0BD7/PID_A010) is bulk-pipe framed commands, NOT EP0 vendor control
@@ -23,11 +42,16 @@ Confirmed registers (see _bulk_read_register/_bulk_write_register call sites):
   - 0x40: self-test/echo pattern. REVISED 2026-08-29: plain write-then-
     readback echo, not a fixed 0x5555/0xD5D5 constant -- see
     _init_controller_handshake. Liveness check only.
-  - 0x46: temperature-adjacent register. Live values track the real captured
-    WinSpec32 session almost exactly (0x9191/0x9292 raw) -- also independently
-    matches PIXCM32.dll's own traced temperature-read register from static
-    analysis (PIPP_Input(handle, 0x46), see git history). Calibration to actual
-    Celsius is NOT yet known -- see get_temperature().
+  - 0x54: detector temperature on READ. The low byte, taken as a two's-
+    complement int8, is degrees Celsius directly -- no scale, no offset.
+    Anchor: read 0x9E9E live 2026-08-29 while WinSpec32 displayed -98 C on the
+    same unit (0x9E = 158 -> -98). The SAME address 0x54 is the timing-table
+    DOWNLOAD target on WRITE; read and write meanings are unrelated. See
+    get_temperature(). SUPERSEDES 0x46 (used until 2026-08-29 on the strength
+    of a decompiled PIXCM32.dll PIPP_Input(handle,0x46) path and some
+    0x9191/0x9292 pokes): 0x46 reads a flat 0x0000 on this unit across a full
+    256-address sweep + 60s watch, and in every USB capture WinSpec only ever
+    *writes* it (0x0096), never reads it.
   - The real, COMPLETE first-trigger arming sequence (REG_RECONFIG_BURST_A/B,
     REG_ARM_PREP/POST, VR_ARM_PREP, REG_ACQ_BUSY x BUSY_POLL_COUNT,
     REG_ACQ_PRETRIGGER, the EP0 0xF0 arm, REG_ACQ_TRIGGER, REG_ACQ_POSTTRIGGER):
@@ -81,6 +105,7 @@ Kept as working infrastructure for the two real EP0 vendor requests observed
 from __future__ import annotations
 import os
 import time
+import queue
 import struct
 import ctypes
 import threading
@@ -136,9 +161,22 @@ BULK_CMD_READ  = 0x03   # "read-trigger": 2-byte reply follows on bulk IN 0x86
 BULK_CMD_WRITE = 0x02   # "write": data_lo/data_hi carries the 16-bit value
 
 REG_SELFTEST         = 0x40   # Self-test/echo pattern (0x5555 / 0xD5D5) -- liveness check only
-REG_TEMPERATURE      = 0x46   # Temperature-adjacent register (raw ADC-like code, uncalibrated)
-REG_ACQ_TRIGGER      = 0x14   # WRITE value=1 -- best-evidenced acquisition trigger
-REG_ACQ_POSTTRIGGER  = 0x32   # One-time read immediately after the trigger write
+REG_TEMPERATURE      = 0x46   # LIVE detector temperature. Decompiled PICM_Get_Temperature for
+                              # the ST-133 (PIXCM32 FUN_10058ab2 -> PIPP_Input(handle, 0x46))
+                              # reads 10 ADC samples here, averages, applies a linear cal.
+                              # Reads 0x0000 while the detector is warm / cooler loop idle.
+REG_TEMP_SETPOINT    = 0x54   # Cooler SETPOINT (on READ): low byte as two's-complement int8
+                              # degrees C. Read 0x9E9E = -98 C on 2026-08-30 -- but this is the
+                              # last value WinSpec programmed, NOT a live reading (it never
+                              # changes, detector was warm). Same address is the PTG timing-
+                              # table DOWNLOAD target on WRITE.
+REG_EXPOSURE         = 0x32   # Integration time, LOW BYTE (0x00..0xFF). Identified 2026-08-30:
+                              # frame mean counts scale ~linearly with this value (dark-current
+                              # integration on a warm detector). Written just before the busy-
+                              # poll in the arm sequence. 0 => minimum integration (flat bias
+                              # frame ~260 counts). WinSpec's captured value was 0xFA (250).
+REG_ACQ_TRIGGER      = 0x14   # WRITE value=1 -- the acquisition trigger
+REG_ACQ_POSTTRIGGER  = 0x32   # (same addr as REG_EXPOSURE) one-time read right after the trigger
 
 # REG_ACQ_BUSY (0xE2) / REG_ACQ_PRETRIGGER (0xE0): RESTORED 2026-08-29 after
 # initially being removed based on USBCapture-AQTime4.pcapng (which showed
@@ -190,16 +228,14 @@ REG_HEARTBEAT_ECHO   = 0x40
 REG_HEARTBEAT_WALK   = 0x4A
 HEARTBEAT_INTERVAL_SEC = 0.1
 
-# Reference point for REG_TEMPERATURE, captured live while the detector was
-# confirmed cold at -98C (user-verified via WinSpec32, 2026-08-29): the raw
-# register dithers between 0x9191/37265 and 0x9292/37522 -- average used as
-# the reference. No second calibration point exists yet, so this can only
-# support a coarse "near this known reading" vs "drifted away from it" check,
-# not a real Celsius conversion. TOLERANCE is a deliberately rough, roughly
-# 6x the observed ~257-count dither noise floor -- not derived from any real
-# counts-per-degree figure (unknown). Widen/narrow freely; it's a heuristic.
-TEMP_REG_COLD_REFERENCE = 37393  # average of 0x9191/0x9292
-TEMP_REG_COLD_TOLERANCE = 1500
+# Both REG_TEMPERATURE (0x46, live) and REG_TEMP_SETPOINT (0x54, setpoint)
+# carry a value in their low byte; read as two's-complement int8 it is degrees
+# Celsius (no scale/offset known -- one anchor: 0x54 low byte 0x9E = -98, the
+# setpoint WinSpec last programmed). REAL calibration of 0x46 (slope/offset,
+# per decompiled PICM_Get_Temperature) is still TODO and needs a cold detector
+# to pin down. Values outside this window are flagged as an implausible decode.
+TEMP_C_PLAUSIBLE_MIN = -140
+TEMP_C_PLAUSIBLE_MAX = 60
 
 
 class WINUSB_SETUP_PACKET(ctypes.Structure):
@@ -249,11 +285,48 @@ class ST133Camera(BaseCamera):
 
     is_mock = False
 
-    def __init__(self, num_pixels: int = 512, dark_current: float = 500.0):
+    def __init__(self, num_pixels: int = 512, dark_current: float = 500.0,
+                 run_init_burst: bool = False, init_burst_target_sec: float = 0.0,
+                 continuous_reader: bool = True):
         self.num_pixels = num_pixels
         self.dark_current = dark_current
         self.is_connected = False
         self.camera_model_name = "Princeton Instruments OMA-V InGaAs (7514-0001)"
+
+        # Replicate piusbwdf.sys's pixel-pipe architecture on WinUSB: a
+        # background pool of overlapped 512-byte reads on 0x82, always pending
+        # and auto-re-armed, feeding a frame assembler. The KMDF driver
+        # (decompiled: FUN_000113cc -> WdfUsbTargetPipeConfigContinuousReader,
+        # TransferLength 0x200, ~2 pending) runs this from device-start; WinUSB
+        # does nothing equivalent, which is why a single ReadPipe issued around
+        # each trigger never caught a frame -- the FX2 auto-commits 512-byte
+        # packets on 0x82 whether or not a host read is pending. Set False to
+        # fall back to the old single-overlapped-read path in acquire_frame.
+        self.continuous_reader = continuous_reader
+
+        # EXPERIMENTAL (2026-08-29): when True, connect() replays WinSpec32's
+        # full cold-boot controller init verbatim from the USB capture -- the
+        # 0x40 unlock handshake, the ~35k-value 0x54 PTG timing-table stream,
+        # interleaved 0xA2 status reads, the 0x40 lock. Every captured session
+        # (cold boot AND warm reconnect) sends this byte-for-byte identical, so
+        # it carries no per-acquisition state. Hypothesis: without the PTG
+        # timing tables loaded the controller never clocks the CCD, so 0x82
+        # stays empty and temperature telemetry is stale. Off by default until
+        # proven -- it is ~15k blocking USB ops and writes DSP state.
+        self.run_init_burst = run_init_burst
+        # "full"  = the ~420-op FullPowerCycle arming sequence (current HEAD).
+        # "short" = the 5-op sequence from commit 2608036 (3x read 0xE2 ->
+        #           read 0xE0 -> write 0x14=1 -> read 0x32), derived from an
+        #           already-warm repeat-trigger capture. Kept as an option to
+        #           retest against a device freshly primed by run_init_burst,
+        #           a combination never tried before.
+        self.trigger_mode = "full"
+        # Unpaced, the replay runs ~2x faster than the real WinSpec session
+        # (~2.5s vs ~4.7s) because FX2 NAK flow control is our only throttle.
+        # If >0, _replay_init_burst spreads coarse sleeps across the stream to
+        # stretch it to roughly this many wall-clock seconds, in case the PTG
+        # needs the slower ingest rate to actually latch the timing tables.
+        self.init_burst_target_sec = init_burst_target_sec
         
         self._device_handle = None
         self._winusb_handle = None
@@ -272,6 +345,12 @@ class ST133Camera(BaseCamera):
         self._bulk_lock = threading.RLock()
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._heartbeat_stop = threading.Event()
+
+        # Continuous pixel-reader state (see continuous_reader / _pixel_reader_loop).
+        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_stop = threading.Event()
+        self._frame_q: "queue.Queue[bytes]" = queue.Queue(maxsize=8)
+        self._reader_alive = threading.Event()
 
     def _find_device_path(self) -> Optional[str]:
         """Locate active Windows PnP device path for Princeton Instruments USB (VID_0BD7&PID_A010)."""
@@ -370,10 +449,30 @@ class ST133Camera(BaseCamera):
                 h_wusb = ctypes.c_void_p(0)
                 if winusb.WinUsb_Initialize(h, ctypes.byref(h_wusb)):
                     self._winusb_handle = h_wusb
-                    # Set 500ms pipe timeout policy on EP0 and bulk endpoints
+
+                    # Re-assert interface 0, alt-setting 0. The real cold-boot
+                    # capture issues a standard SET_INTERFACE (bReq=0x0B) right
+                    # after SET_CONFIGURATION -- WinUsb_Initialize does the
+                    # latter but not this, and re-selecting the alt setting also
+                    # resets endpoint data-toggle state per USB spec. NOTE this
+                    # silently reverts pipe policies to OS defaults, so it must
+                    # come BEFORE the SetPipePolicy loop below.
+                    try:
+                        winusb.WinUsb_SetCurrentAlternateSetting(self._winusb_handle, 0)
+                    except Exception as ex:
+                        logger.debug(f"WinUsb_SetCurrentAlternateSetting(0) notice: {ex}")
+
+                    # Pipe transfer-timeout policy. 500ms on the command pipes
+                    # (0x00/0x08/0x86), but 0 (wait forever) on the pixel pipe
+                    # 0x82: the real capture shows the 0x82 read submitted ~47ms
+                    # BEFORE the trigger and completing exactly one exposure
+                    # later, so its lifetime is bounded by the (arbitrary)
+                    # exposure, not a fixed policy value. acquire_frame() now
+                    # posts that read as overlapped I/O and bounds it itself via
+                    # CancelIoEx -- see _begin_overlapped_read.
                     PIPE_TRANSFER_TIMEOUT = 0x03
-                    timeout_ms = wintypes.ULONG(500)
                     for p_id in [0x00, 0x08, 0x82, 0x86]:
+                        timeout_ms = wintypes.ULONG(0 if p_id == 0x82 else 500)
                         winusb.WinUsb_SetPipePolicy(
                             self._winusb_handle,
                             p_id,
@@ -381,6 +480,22 @@ class ST133Camera(BaseCamera):
                             ctypes.sizeof(timeout_ms),
                             ctypes.byref(timeout_ms)
                         )
+
+                    # ALLOW_PARTIAL_READS on 0x82 -- the WinUSB equivalent of
+                    # USBD_SHORT_TRANSFER_OK, which APAUSB.sys (decompiled) sets
+                    # on every bulk-IN URB (TransferFlags=3). Default is already
+                    # TRUE, set explicitly for clarity. RAW_IO is intentionally
+                    # NOT used: APAUSB is a buffered synchronous pass-through,
+                    # not raw, and RAW_IO makes WinUSB ignore ALLOW_PARTIAL_READS.
+                    ALLOW_PARTIAL_READS = 0x05
+                    partial_on = wintypes.ULONG(1)
+                    try:
+                        winusb.WinUsb_SetPipePolicy(
+                            self._winusb_handle, 0x82, ALLOW_PARTIAL_READS,
+                            ctypes.sizeof(partial_on), ctypes.byref(partial_on)
+                        )
+                    except Exception as ex:
+                        logger.debug(f"ALLOW_PARTIAL_READS policy on 0x82 notice: {ex}")
                     logger.info("WinUSB initialized successfully for ST-133.")
 
             self.is_connected = True
@@ -399,9 +514,25 @@ class ST133Camera(BaseCamera):
             # Execute Step 7: Controller Handshake & EPLD Decoder Arming (PIPP_Initialize)
             self._init_controller_handshake()
 
+            # The 0x42 / 0xC0<-0xDEAD / 0xCA register handshake piusbwdf.sys
+            # runs at driver-attach but WinUsb_Initialize does not (see
+            # _attach_handshake).
+            self._attach_handshake()
+
+            # EXPERIMENTAL, opt-in: replay WinSpec32's full cold-boot init
+            # (0x40 unlock -> 0x54 PTG timing-table stream -> 0x40 lock) so the
+            # controller actually clocks the CCD on a trigger. See __init__.
+            if self.run_init_burst:
+                self._replay_init_burst()
+
             # Start the continuous background heartbeat -- see _heartbeat_loop
             # for why this runs for the life of the connection, not just once.
             self._start_heartbeat()
+
+            # Start the continuous pixel reader on 0x82 (WinUSB equivalent of
+            # piusbwdf.sys's WdfUsbTargetPipeConfigContinuousReader) so a frame
+            # is caught whenever the FX2 clocks one out -- see _pixel_reader_loop.
+            self._start_pixel_reader()
             return True
         except Exception as ex:
             logger.error(f"Error connecting to ST-133 controller: {ex}")
@@ -497,14 +628,117 @@ class ST133Camera(BaseCamera):
             res = winusb.WinUsb_WritePipe(self._winusb_handle, 0x08, buf, 6, ctypes.byref(trans), None)
             return bool(res)
 
+    def _replay_init_burst(self) -> bool:
+        """
+        Replay WinSpec32's cold-boot controller init verbatim from the USB
+        capture (st133_init_replay.REPLAY_OPS): the 0x40 unlock handshake, the
+        ~35,209-value 0x54 PTG timing-table stream (proven byte-identical
+        across every captured session -> no per-acquisition state), the
+        interleaved 0xA2/0x40 status reads, the 0x40 lock, and the trailing
+        0x4A "host alive" walk.
+
+        Sent exactly as the transfers appeared on the wire -- same byte-for-
+        byte framing (6..78 byte chunks), and NO artificial pacing: the FX2
+        NAKs when its endpoint FIFO is full, which throttles this loop to the
+        rate the silicon can digest (a Python sleep loop can't hit the ~294us
+        inter-packet timing on Windows anyway). The interleaved 2-byte reply
+        reads also naturally rate-limit the stream.
+
+        The two leading CTRL_OUT ops (SET_CONFIGURATION / SET_INTERFACE) are
+        skipped -- WinUsb_Initialize + WinUsb_SetCurrentAlternateSetting in
+        connect() already cover those. The trailing REG_RECONFIG_BURST_A (the
+        last 6 ops) is dropped: it belongs to the trigger sequence, which
+        _trigger_acquisition() sends.
+
+        Aborts (returns False) on the first failed/short transfer rather than
+        blasting the rest of the stream out of sync.
+        """
+        if not self._winusb_handle or not winusb:
+            return False
+        try:
+            from .st133_init_replay import REPLAY_OPS
+        except Exception as ex:
+            logger.warning(f"ST-133 init-burst replay data unavailable: {ex}")
+            return False
+
+        ops = list(REPLAY_OPS)
+        _RECONFIG_A = [(0x30, 0), (0x30, 1), (0x30, 3), (0x00, 0), (0xFE, 0), (0x3C, 1)]
+        tail = [
+            (o[2][1], o[2][4] | (o[2][5] << 8))
+            for o in ops[-6:] if o[0] == "BULK_OUT" and len(o[2]) == 6
+        ]
+        if tail == _RECONFIG_A:
+            ops = ops[:-6]
+
+        # Optional coarse pacing: sleep every PACE_BATCH ops to stretch the
+        # whole replay toward init_burst_target_sec wall-clock seconds. Per-op
+        # sub-ms sleeps are unreliable on Windows, so we sleep in chunks.
+        PACE_BATCH = 24
+        pace_sleep = 0.0
+        if self.init_burst_target_sec > 0:
+            pace_sleep = max(0.0, self.init_burst_target_sec / max(1, len(ops))) * PACE_BATCH
+
+        logger.info(
+            f"ST-133: replaying {len(ops)} cold-boot init ops verbatim "
+            f"({'unpaced' if pace_sleep == 0 else f'~{self.init_burst_target_sec:.1f}s target'})..."
+        )
+        t0 = time.monotonic()
+        n_out = n_in = 0
+        with self._bulk_lock:
+            for idx, op in enumerate(ops):
+                if pace_sleep and idx and idx % PACE_BATCH == 0:
+                    time.sleep(pace_sleep)
+                kind = op[0]
+                if kind == "CTRL_OUT":
+                    continue  # SET_CONFIGURATION / SET_INTERFACE handled in connect()
+                if kind == "BULK_OUT":
+                    ep, data = op[1], op[2]
+                    buf = (ctypes.c_ubyte * len(data)).from_buffer_copy(bytearray(data))
+                    trans = wintypes.ULONG(0)
+                    ok = winusb.WinUsb_WritePipe(
+                        self._winusb_handle, ep, buf, len(data), ctypes.byref(trans), None
+                    )
+                    if not ok:
+                        err = kernel32.GetLastError() if kernel32 else -1
+                        logger.error(
+                            f"ST-133 init burst: WritePipe failed at op {idx}/{len(ops)} "
+                            f"({bytes(data).hex()}), error {err} -- aborting."
+                        )
+                        return False
+                    n_out += 1
+                elif kind == "BULK_IN":
+                    ep, exp = op[1], op[2]
+                    rb = ctypes.create_string_buffer(exp)
+                    trans = wintypes.ULONG(0)
+                    ok = winusb.WinUsb_ReadPipe(
+                        self._winusb_handle, ep, rb, exp, ctypes.byref(trans), None
+                    )
+                    if not ok or trans.value != exp:
+                        logger.error(
+                            f"ST-133 init burst: ReadPipe short/failed at op {idx}/{len(ops)} "
+                            f"(got {trans.value}/{exp}) -- aborting; controller state now partial."
+                        )
+                        return False
+                    n_in += 1
+        logger.info(
+            f"ST-133 init burst complete: {n_out} writes + {n_in} reads in {time.monotonic() - t0:.2f}s."
+        )
+        return True
+
     def _bulk_read_frame(self, expected_bytes: int) -> Optional[bytes]:
         """
-        Read raw frame bytes from the pixel pipe (bulk IN 0x82). Confirmed
-        live 2026-08-29: no explicit "arm" request is needed on 0x82 itself
-        (matches piusbwdf.sys's continuous-reader architecture, Parts 4/5) --
-        data simply arrives once the acquisition trigger sequence (see
-        acquire_frame) has been sent. WinUsb_ReadPipe's own pipe-policy
-        timeout (set once in connect()) bounds this call.
+        Blocking read of raw frame bytes from the pixel pipe (bulk IN 0x82).
+
+        SUPERSEDED for acquire_frame() by the overlapped
+        _begin_overlapped_read/_end_overlapped_read pair -- kept only for
+        callers that already know a frame is sitting in the FIFO. The real
+        WinSpec capture (USB Capture/analysis/claude_dataset,
+        USBCapture-FullPowerCycle.pcapng) shows the 0x82 read is SUBMITTED
+        ~47ms BEFORE the trigger write and completes exactly one exposure
+        later; posting a blocking read only AFTER the trigger (what this
+        method does) is why frame delivery never worked over WinUSB -- the
+        data is clocked into the FX2 endpoint with no host read pending and
+        is lost.
         """
         if not self._winusb_handle or not winusb:
             return None
@@ -515,6 +749,211 @@ class ST133Camera(BaseCamera):
             if res and trans.value > 0:
                 return buf.raw[:trans.value]
             return None
+
+    def _begin_overlapped_read(self, pipe_id: int, nbytes: int) -> Optional[dict]:
+        """
+        Post a non-blocking (overlapped) bulk IN read and return a context
+        dict to reap later with _end_overlapped_read.
+
+        This exists so acquire_frame() can ARM the pixel pipe (0x82) BEFORE
+        it writes the acquisition trigger, exactly as the real WinSpec32
+        session does: in every capture the 0x82 read request is submitted
+        ~47ms ahead of the trigger and the single outstanding read then
+        completes one full exposure later with all 1024 bytes. A blocking
+        WinUsb_ReadPipe issued after the trigger (the old path) misses the
+        frame entirely.
+
+        Caller MUST pass the result to _end_overlapped_read exactly once
+        (with cancel=True if it gave up waiting) so the event handle is
+        closed and any still-pending transfer is cancelled.
+        """
+        if not self._winusb_handle or not winusb or not kernel32:
+            return None
+        buf = ctypes.create_string_buffer(nbytes)
+        ov = OVERLAPPED()
+        ov.hEvent = kernel32.CreateEventW(None, True, False, None)  # manual-reset, unsignalled
+        trans = wintypes.ULONG(0)
+        res = winusb.WinUsb_ReadPipe(
+            self._winusb_handle, pipe_id, buf, nbytes, ctypes.byref(trans), ctypes.byref(ov)
+        )
+        ctx = {"buf": buf, "ov": ov, "event": ov.hEvent, "pipe": pipe_id, "done": False, "nbytes": 0}
+        if res:
+            # Completed synchronously (rare for a not-yet-triggered pipe).
+            ctx["done"] = True
+            ctx["nbytes"] = trans.value
+            return ctx
+        err = kernel32.GetLastError()
+        if err != 997:  # not ERROR_IO_PENDING -- rejected outright
+            kernel32.CloseHandle(ov.hEvent)
+            logger.error(f"Overlapped read on pipe 0x{pipe_id:02X} rejected immediately: error {err}")
+            return None
+        return ctx
+
+    def _end_overlapped_read(self, ctx: Optional[dict], cancel: bool = False) -> Optional[bytes]:
+        """
+        Reap (or cancel then reap) a read started by _begin_overlapped_read.
+        Returns the bytes actually received, or None. Always closes the event
+        handle. Pass cancel=True if you stopped waiting before the event was
+        signalled -- otherwise the GetOverlappedResult(wait=True) below would
+        block forever on a transfer that never completes.
+        """
+        if not ctx:
+            return None
+        try:
+            if ctx.get("done"):
+                n = ctx.get("nbytes", 0)
+                return ctx["buf"].raw[:n] if n > 0 else None
+            if cancel and self._device_handle and kernel32:
+                kernel32.CancelIoEx(self._device_handle, ctypes.byref(ctx["ov"]))
+            trans = wintypes.ULONG(0)
+            getres = getattr(winusb, "WinUsb_GetOverlappedResult", None)
+            if getres is not None:
+                ok = getres(self._winusb_handle, ctypes.byref(ctx["ov"]), ctypes.byref(trans), True)
+            else:
+                ok = kernel32.GetOverlappedResult(
+                    self._device_handle, ctypes.byref(ctx["ov"]), ctypes.byref(trans), True
+                )
+            if ok and trans.value > 0:
+                return ctx["buf"].raw[:trans.value]
+            return None
+        except Exception as ex:
+            logger.warning(f"Overlapped read reap notice: {ex}")
+            return None
+        finally:
+            if ctx.get("event") and kernel32:
+                kernel32.CloseHandle(ctx["event"])
+
+    # ------------------------------------------------------------------
+    # Attach handshake + continuous pixel reader (Path B, 2026-08-29)
+    # ------------------------------------------------------------------
+
+    def _attach_handshake(self) -> dict:
+        """
+        The ReadEPLDVersions protocol (decompiled: FUN_00012e9c). In the vendor
+        stack this runs as user-mode IOCTLs that translate to 8-byte bulk
+        frames; it is NOT done by the ST133's driver at attach (that path is
+        PIXIS-only), so nothing performs it before our WinUSB session -- we do
+        it here.
+
+        1. EPLD-ready poll: write 0xBEEF -> 0xC0, read 0x42, until
+           (0x42 & 0xFFF) == 0x113.
+        2. Read version registers 0xC0, 0xC2, 0xC4, 0xC6, 0xC8.
+        3. Write 0xDEAD -> 0xC0, read 0xCA (the decompiled code fails the whole
+           init if the low byte of 0xCA comes back < 3).
+
+        Returns a dict of what happened; best-effort, does not gate connect().
+        """
+        result = {"ready": False, "poll_iters": 0, "reg42": None, "versions": {}, "reg_ca": None}
+        if not self._winusb_handle or not winusb:
+            return result
+        try:
+            with self._bulk_lock:
+                for i in range(400):
+                    self._bulk_write_register(0xC0, 0xBEEF)
+                    v = self._bulk_read_register(0x42)
+                    result["reg42"] = v
+                    result["poll_iters"] = i + 1
+                    if v is not None and (v & 0xFFF) == 0x113:
+                        result["ready"] = True
+                        break
+
+                for op in (0xC0, 0xC2, 0xC4, 0xC6, 0xC8):
+                    result["versions"][op] = self._bulk_read_register(op)
+
+                self._bulk_write_register(0xC0, 0xDEAD)
+                result["reg_ca"] = self._bulk_read_register(0xCA)
+
+            vers = {hex(k): (None if x is None else hex(x)) for k, x in result["versions"].items()}
+            logger.info(
+                f"ST-133 EPLD handshake: ready={result['ready']} "
+                f"(0x42={result['reg42'] if result['reg42'] is None else hex(result['reg42'])} "
+                f"after {result['poll_iters']} polls), versions={vers}, "
+                f"0xCA={result['reg_ca'] if result['reg_ca'] is None else hex(result['reg_ca'])}"
+            )
+            if not result["ready"]:
+                logger.warning("ST-133 EPLD never reported ready (0x42 & 0xFFF != 0x113) -- pixel pipe likely stays dead.")
+        except Exception as ex:
+            logger.debug(f"ST-133 EPLD handshake notice: {ex}")
+        return result
+
+    def _pixel_reader_loop(self) -> None:
+        """
+        Background pool of overlapped 512-byte reads on the pixel pipe (0x82),
+        always pending and re-armed the instant one completes -- the WinUSB
+        equivalent of the KMDF driver's continuous reader. Completed 512-byte
+        chunks are concatenated; every time num_pixels*2 bytes have accumulated
+        a whole frame is pushed onto _frame_q for acquire_frame() to consume.
+        """
+        POOL = 4
+        CHUNK = 512
+        expected = self.num_pixels * 2
+        ctxs: List[Optional[dict]] = []
+        accum = bytearray()
+        try:
+            for _ in range(POOL):
+                ctxs.append(self._begin_overlapped_read(0x82, CHUNK))
+            if not any(ctxs):
+                logger.warning("ST-133 pixel reader: could not post any 0x82 reads; disabling.")
+                return
+            self._reader_alive.set()
+            logger.info(f"ST-133 pixel reader running ({POOL}x {CHUNK}B overlapped on 0x82).")
+
+            while not self._reader_stop.is_set():
+                progressed = False
+                for i, c in enumerate(ctxs):
+                    if c is None:
+                        ctxs[i] = self._begin_overlapped_read(0x82, CHUNK)
+                        continue
+                    if c.get("done") or (kernel32 and kernel32.WaitForSingleObject(c["event"], 0) == 0):
+                        got = self._end_overlapped_read(c, cancel=False)
+                        ctxs[i] = self._begin_overlapped_read(0x82, CHUNK)
+                        progressed = True
+                        if got:
+                            accum.extend(got)
+                            while len(accum) >= expected:
+                                frame = bytes(accum[:expected])
+                                del accum[:expected]
+                                try:
+                                    self._frame_q.put_nowait(frame)
+                                except queue.Full:
+                                    try:
+                                        self._frame_q.get_nowait()
+                                    except queue.Empty:
+                                        pass
+                                    try:
+                                        self._frame_q.put_nowait(frame)
+                                    except queue.Full:
+                                        pass
+                if not progressed:
+                    self._reader_stop.wait(0.01)
+        except Exception as ex:
+            logger.warning(f"ST-133 pixel reader loop stopped: {ex}")
+        finally:
+            self._reader_alive.clear()
+            for c in ctxs:
+                if c is not None:
+                    self._end_overlapped_read(c, cancel=True)
+
+    def _start_pixel_reader(self) -> None:
+        if not self.continuous_reader or not self._winusb_handle or not winusb:
+            return
+        if self._reader_thread and self._reader_thread.is_alive():
+            return
+        self._reader_stop.clear()
+        self._reader_alive.clear()
+        with self._frame_q.mutex:
+            self._frame_q.queue.clear()
+        self._reader_thread = threading.Thread(
+            target=self._pixel_reader_loop, name="ST133PixelReader", daemon=True
+        )
+        self._reader_thread.start()
+
+    def _stop_pixel_reader(self) -> None:
+        self._reader_stop.set()
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=2.0)
+        self._reader_thread = None
+        self._reader_alive.clear()
 
     def _write_register(self, addr: int, value: int) -> bool:
         """
@@ -883,6 +1322,16 @@ class ST133Camera(BaseCamera):
         acquisitions.
         """
         with self._bulk_lock:
+            if self.trigger_mode == "short":
+                # 5-op sequence from commit 2608036 (AQTime4 repeat-trigger
+                # capture). Retest vehicle for run_init_burst-primed devices.
+                for _ in range(3):
+                    self._bulk_read_register(REG_ACQ_BUSY)
+                self._bulk_read_register(REG_ACQ_PRETRIGGER)
+                self._bulk_write_register(REG_ACQ_TRIGGER, 1)
+                self._bulk_read_register(REG_ACQ_POSTTRIGGER)
+                return
+
             for addr, val in REG_RECONFIG_BURST_A:
                 self._bulk_write_register(addr, val)
             for addr, val in REG_ARM_PREP:
@@ -953,6 +1402,7 @@ class ST133Camera(BaseCamera):
 
     def disconnect(self):
         """Close communication handles cleanly."""
+        self._stop_pixel_reader()
         self._stop_heartbeat()
         if self._winusb_handle and winusb:
             try:
@@ -989,6 +1439,16 @@ class ST133Camera(BaseCamera):
         exposure duration is whatever the controller itself uses internally.
 
         Returns exact zeros (0 counts) when hardware is in standby (no synthetic data).
+
+        ORDER OF OPERATIONS (revised 2026-08-29 from the timestamped capture
+        dataset in USB Capture/analysis/claude_dataset): the pixel-pipe read
+        is ARMED FIRST, as an overlapped transfer, and only then is the
+        trigger sequence written. Every real capture shows the 0x82 read
+        submitted ~47ms before the trigger, with the single outstanding read
+        completing exactly one exposure later carrying all 1024 bytes. The
+        previous code triggered first and posted a blocking read afterwards,
+        by which point the frame had already been clocked into the FX2
+        endpoint with no host read pending -- lost every time.
         """
         if not self.is_connected or not self._winusb_handle:
             if not self.connect():
@@ -1001,24 +1461,91 @@ class ST133Camera(BaseCamera):
             )
             return np.zeros(self.num_pixels, dtype=np.int64), 0
 
-        # 1. Replay the captured acquisition-trigger sequence
-        self._trigger_acquisition()
-
-        # 2. Wait for Exposure Duration with Real-Time Progress Updates
-        steps = max(1, int(exposure_time_sec / 0.05))
-        for step in range(steps):
-            if stop_requested and stop_requested():
-                break
-            time.sleep(min(0.05, exposure_time_sec / steps))
-            if progress_callback:
-                progress_callback(min(1.0, (step + 1) / steps))
-
-        # 3. Read 512 uint16 Pixels (1024 bytes) from the pixel pipe (0x82)
         expected_bytes = self.num_pixels * 2
-        frame_bytes = self._bulk_read_frame(expected_bytes)
+
+        # --- Path B: the continuous pixel reader is running. It already has
+        #     512-byte reads pending on 0x82, so we just trigger and then pull
+        #     the next assembled frame off the queue. ---
+        if self._reader_alive.is_set():
+            try:
+                while True:
+                    self._frame_q.get_nowait()  # drop stale frames -> return a post-trigger one
+            except queue.Empty:
+                pass
+
+            with self._bulk_lock:
+                self._trigger_acquisition()
+
+            deadline = time.monotonic() + exposure_time_sec + 3.0
+            steps = max(1, int(exposure_time_sec / 0.05))
+            step = 0
+            frame_bytes = None
+            while time.monotonic() < deadline:
+                if stop_requested and stop_requested():
+                    break
+                try:
+                    frame_bytes = self._frame_q.get(timeout=0.05)
+                    break
+                except queue.Empty:
+                    step += 1
+                    if progress_callback:
+                        progress_callback(min(0.99, step / steps))
+
+            if frame_bytes and len(frame_bytes) >= expected_bytes:
+                raw_data = np.frombuffer(frame_bytes[:expected_bytes], dtype=np.uint16)
+                if progress_callback:
+                    progress_callback(1.0)
+                return raw_data.astype(np.int64), 1
+            logger.warning("ST-133 no frame from pixel reader before deadline.")
+            return np.zeros(self.num_pixels, dtype=np.int64), 0
+
+        # --- Fallback (continuous_reader=False, or reader failed to start):
+        #     arm ONE overlapped read before the trigger, wait, reap. ---
+        # Hold the bulk lock across arm-read + trigger + wait: the real
+        # session goes completely silent on the bus for the whole exposure
+        # (no heartbeat writes between the trigger and the frame completion),
+        # so the heartbeat thread must not inject anything here either.
+        with self._bulk_lock:
+            # 1. Arm the pixel pipe BEFORE triggering (overlapped, stays pending).
+            rd = self._begin_overlapped_read(0x82, expected_bytes)
+            if rd is None:
+                return np.zeros(self.num_pixels, dtype=np.int64), 0
+
+            frame_bytes = None
+            try:
+                # 2. Replay the captured acquisition-trigger sequence.
+                self._trigger_acquisition()
+
+                # 3. Wait for the frame, pacing progress callbacks. The frame
+                #    lands ~one exposure after the trigger; allow generous slack
+                #    on top before giving up and cancelling the transfer.
+                deadline = time.monotonic() + exposure_time_sec + 3.0
+                steps = max(1, int(exposure_time_sec / 0.05))
+                step = 0
+                signalled = False
+                while True:
+                    if stop_requested and stop_requested():
+                        break
+                    w = kernel32.WaitForSingleObject(rd["event"], 50) if kernel32 else 258
+                    if w == 0:  # WAIT_OBJECT_0 -- frame arrived
+                        signalled = True
+                        break
+                    if time.monotonic() > deadline:
+                        logger.warning("ST-133 frame did not arrive on 0x82 before deadline; cancelling read.")
+                        break
+                    step += 1
+                    if progress_callback:
+                        progress_callback(min(1.0, step / steps))
+
+                frame_bytes = self._end_overlapped_read(rd, cancel=not signalled)
+            except Exception:
+                self._end_overlapped_read(rd, cancel=True)
+                raise
 
         if frame_bytes and len(frame_bytes) >= expected_bytes:
             raw_data = np.frombuffer(frame_bytes[:expected_bytes], dtype=np.uint16)
+            if progress_callback:
+                progress_callback(1.0)
             return raw_data.astype(np.int64), 1
 
         # Strict scientific integrity: Return exact zeros when in standby
@@ -1035,46 +1562,55 @@ class ST133Camera(BaseCamera):
             return np.stack([mono_2d] * 3, axis=-1)
         return mono_2d
 
+    @staticmethod
+    def _int8_c(word: Optional[int]) -> Optional[float]:
+        """Low byte of a register word as two's-complement int8 -> degrees C."""
+        if word is None:
+            return None
+        b = word & 0xFF
+        c = b - 256 if b >= 128 else b
+        return float(c) if TEMP_C_PLAUSIBLE_MIN <= c <= TEMP_C_PLAUSIBLE_MAX else None
+
     def get_temperature(self) -> Optional[dict]:
         """
-        Query the temperature-adjacent register (0x46) via the real bulk-pipe
-        protocol -- live-confirmed 2026-08-29 against real hardware, with
-        values tracking a real captured WinSpec32 session on the same unit
-        almost exactly (raw 0x9191/0x9292).
+        Detector temperature.
 
-        NOTE: the raw register value itself is real and live; the conversion
-        to degrees Celsius is NOT confirmed -- no calibration constants (slope/
-        offset) have been recovered from either the capture or documentation
-        yet. temperature_c is therefore left as None (uncalibrated) rather
-        than reporting a fabricated number; raw_register is populated instead
-        so the real reading is still visible.
+        REVISED 2026-08-30: the LIVE temperature is REG_TEMPERATURE (0x46), per
+        decompiled PICM_Get_Temperature. On this unit it currently reads
+        0x0000 -- the detector is warm and the cooler/temperature-sense loop is
+        not running, so there is no live reading yet. REG_TEMP_SETPOINT (0x54)
+        still holds the last cooler setpoint WinSpec programmed (low byte int8
+        C, e.g. -98) -- that is NOT the current temperature, it never changes.
 
-        is_near_cold_reference gives a coarse, qualitative "still close to
-        the one known-cold reading" check (see TEMP_REG_COLD_REFERENCE/
-        _TOLERANCE) -- useful for confirming the detector is cold without
-        needing an actual calibrated temperature. It is NOT a real
-        temperature threshold, just a proximity check against one sample.
+        Reported as: temperature_c from 0x46 when non-zero and plausibly
+        decodable, else None with status NO_LIVE_TEMP; setpoint_c from 0x54.
+        A real 0x46 slope/offset calibration is still TODO (needs a cold
+        detector to pin down).
         """
-        temp_val = None
-        raw_val = None
-        is_near_cold_ref = None
+        raw_temp = raw_set = None
+        temp_c = setpoint_c = None
         status_str = "OFFLINE"
 
         if self.is_connected and self._winusb_handle:
-            raw_val = self._bulk_read_register(REG_TEMPERATURE)
-            if raw_val is not None:
-                is_near_cold_ref = abs(raw_val - TEMP_REG_COLD_REFERENCE) <= TEMP_REG_COLD_TOLERANCE
-                status_str = "NEAR_KNOWN_COLD_POINT" if is_near_cold_ref else "DRIFTED_FROM_COLD_POINT"
-                self._last_temperature = None
+            raw_temp = self._bulk_read_register(REG_TEMPERATURE)
+            raw_set = self._bulk_read_register(REG_TEMP_SETPOINT)
+            setpoint_c = self._int8_c(raw_set)
+            if raw_temp:  # non-zero -> a live reading is available
+                temp_c = self._int8_c(raw_temp)
+                status_str = "OK" if temp_c is not None else "DECODE_IMPLAUSIBLE"
+                if temp_c is not None:
+                    self._last_temperature = temp_c
+            else:
+                status_str = "NO_LIVE_TEMP"  # 0x46 == 0: cooler/sense loop idle (warm detector)
 
         return {
-            "temperature_c": temp_val,
-            "setpoint_c": None,
-            "status": 1 if raw_val is not None else 0,
+            "temperature_c": temp_c,
+            "setpoint_c": setpoint_c,
+            "status": 1 if temp_c is not None else 0,
             "status_str": status_str,
-            "raw_register": raw_val,
-            "is_near_cold_reference": is_near_cold_ref,
-            "is_simulated": False
+            "raw_register": raw_temp,
+            "raw_setpoint": raw_set,
+            "is_simulated": False,
         }
 
     def get_detector_info(self) -> dict:

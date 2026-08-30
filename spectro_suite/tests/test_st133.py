@@ -15,6 +15,8 @@ from spectro_suite.hardware.detectors.st133_usb import (
     BULK_CMD_WRITE,
     REG_SELFTEST,
     REG_TEMPERATURE,
+    REG_TEMP_SETPOINT,
+    REG_EXPOSURE,
     REG_ACQ_TRIGGER,
     REG_ACQ_POSTTRIGGER,
     REG_ACQ_BUSY,
@@ -27,8 +29,8 @@ from spectro_suite.hardware.detectors.st133_usb import (
     VR_ARM_PREP,
     REG_HEARTBEAT_ECHO,
     REG_HEARTBEAT_WALK,
-    TEMP_REG_COLD_REFERENCE,
-    TEMP_REG_COLD_TOLERANCE,
+    TEMP_C_PLAUSIBLE_MIN,
+    TEMP_C_PLAUSIBLE_MAX,
 )
 
 
@@ -69,7 +71,9 @@ class TestST133Driver(unittest.TestCase):
         self.assertEqual(BULK_CMD_READ, 0x03)
         self.assertEqual(BULK_CMD_WRITE, 0x02)
         self.assertEqual(REG_SELFTEST, 0x40)
-        self.assertEqual(REG_TEMPERATURE, 0x46)
+        self.assertEqual(REG_TEMPERATURE, 0x46)      # live temp ADC (per decompiled PICM_Get_Temperature)
+        self.assertEqual(REG_TEMP_SETPOINT, 0x54)    # cooler setpoint (stale -98 while warm)
+        self.assertEqual(REG_EXPOSURE, 0x32)         # integration time, low byte (found 2026-08-30)
         self.assertEqual(REG_ACQ_TRIGGER, 0x14)
         self.assertEqual(REG_ACQ_POSTTRIGGER, 0x32)
 
@@ -119,12 +123,45 @@ class TestST133Driver(unittest.TestCase):
         self.assertIsNone(temp_info["temperature_c"])
         self.assertEqual(temp_info["status_str"], "OFFLINE")
         self.assertEqual(temp_info["status"], 0)
-        self.assertIsNone(temp_info["is_near_cold_reference"])
+        self.assertIsNone(temp_info["raw_register"])
 
-    def test_cold_reference_matches_captured_dither_average(self):
-        """Cold reference must be the average of the two live-confirmed dithered raw values (0x9191/0x9292)."""
-        self.assertEqual(TEMP_REG_COLD_REFERENCE, (0x9191 + 0x9292) // 2)
-        self.assertGreater(TEMP_REG_COLD_TOLERANCE, 257)  # must exceed the observed dither noise floor
+    def test_temperature_live_vs_setpoint(self):
+        """
+        REG_TEMPERATURE (0x46) = live temp ADC; REG_TEMP_SETPOINT (0x54) =
+        cooler setpoint. Both decode as int8 Celsius from the low byte. A
+        warm/idle detector reads 0x46 == 0 -> temperature_c None, status
+        NO_LIVE_TEMP, but setpoint_c still comes from 0x54.
+        """
+        self.assertEqual(REG_TEMPERATURE, 0x46)
+        self.assertEqual(REG_TEMP_SETPOINT, 0x54)
+        self.assertLess(TEMP_C_PLAUSIBLE_MIN, -98)
+        self.assertGreater(TEMP_C_PLAUSIBLE_MAX, -98)
+
+        self.cam.is_connected = True
+        self.cam._winusb_handle = object()
+        try:
+            # warm detector: 0x46 == 0, 0x54 holds the -98 setpoint
+            self.cam._bulk_read_register = lambda a: 0x0000 if a == REG_TEMPERATURE else 0x9E9E
+            info = self.cam.get_temperature()
+            self.assertIsNone(info["temperature_c"])
+            self.assertEqual(info["status_str"], "NO_LIVE_TEMP")
+            self.assertEqual(info["setpoint_c"], -98.0)
+
+            # cold detector: 0x46 gives a real live reading
+            self.cam._bulk_read_register = lambda a: 0x9191 if a == REG_TEMPERATURE else 0x9E9E
+            info = self.cam.get_temperature()
+            self.assertEqual(info["temperature_c"], -111.0)
+            self.assertEqual(info["status_str"], "OK")
+            self.assertEqual(info["setpoint_c"], -98.0)
+
+            # implausible decode on 0x46
+            self.cam._bulk_read_register = lambda a: 0x4040 if a == REG_TEMPERATURE else 0x9E9E
+            info = self.cam.get_temperature()
+            self.assertIsNone(info["temperature_c"])
+            self.assertEqual(info["status_str"], "DECODE_IMPLAUSIBLE")
+        finally:
+            self.cam.is_connected = False
+            self.cam._winusb_handle = None
 
     def test_detector_info_and_1024_support(self):
         """Verify detector info reporting and 1024-pixel timing generation."""

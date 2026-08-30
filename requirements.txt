@@ -6,3 +6,8 @@ customtkinter>=6.0.0
 
 # Optional Windows COM automation (uncomment on Windows if using WinSpec32)
 # pywin32>=306; sys_platform == 'win32'
+
+# Princeton Instruments ST-133 / OMA-V InGaAs over libusbK (64-bit frame path).
+# Device must be bound to the libusbK driver via Zadig. See IN_PROGRESS.md.
+pyusb>=1.2
+libusb-package>=1.0.26

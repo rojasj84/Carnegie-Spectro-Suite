@@ -17,6 +17,7 @@ from .detectors import (
     MockDetector,
     PIMTECamera,
     ST133Camera,
+    ST133LibUsbCamera,
     WinSpecController,
     BlackflySCamera,
     MockBlackflySCamera,
@@ -48,6 +49,12 @@ def create_camera(config: SpectrometerConfig, force_mock: bool = False) -> Camer
         return MockCamera(config.num_pixels)
 
     if any(k in cam_model for k in ("ST133", "ST-133", "OMA", "INGAAS", "7514")):
+        # libusbK transport (pyusb) is the only one that delivers pixel frames
+        # on 64-bit Windows -- see st133_libusb.py / IN_PROGRESS.md. Opt in via
+        # a model string containing "LIBUSB"; the default stays on the WinUSB
+        # ST133Camera (register I/O + setpoint only).
+        if "LIBUSB" in cam_model:
+            return ST133LibUsbCamera(num_pixels=config.num_pixels)
         return ST133Camera(num_pixels=config.num_pixels)
 
     if any(k in cam_model for k in ("FLIR", "BLACKFLY", "BFS", "SPINNAKER")):
