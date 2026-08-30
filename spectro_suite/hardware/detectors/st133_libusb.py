@@ -243,7 +243,15 @@ class ST133LibUsbCamera(BaseCamera):
 
         correct_bad_pixels: replace BAD_PIXELS (the run-off-the-end pixel 511)
         with the nearest good neighbour. Set False to see the raw array.
+
+        exposure_time_sec is mapped to REG_EXPOSURE with a PLACEHOLDER scale
+        (1.0 s -> 250, WinSpec's captured value) so a GUI exposure slider does
+        something. The true units->seconds relation is not yet characterised;
+        set self.exposure_units directly for reproducible raw control, or pass
+        exposure_time_sec <= 0 to use self.exposure_units unchanged.
         """
+        if exposure_time_sec and exposure_time_sec > 0:
+            self.exposure_units = int(max(0, min(255, round(exposure_time_sec * 250))))
         n_bytes = self.num_pixels * 2
         if not self.is_connected or self._dev is None:
             if not self.connect():

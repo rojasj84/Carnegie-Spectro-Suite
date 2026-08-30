@@ -171,7 +171,7 @@ class DeviceSelectorDialog:
         self.cbo_camera = ttk.Combobox(
             grid,
             textvariable=self.var_camera,
-            values=["Princeton Instruments ST-133 InGaAs (512)", "FLIR Blackfly S BFS-U3", "PI MTE USB Camera", "Simulated Detector (Demo)", "Custom / Other"],
+            values=["Princeton Instruments ST-133 InGaAs (512)", "Princeton Instruments ST-133 InGaAs (libusbK)", "FLIR Blackfly S BFS-U3", "PI MTE USB Camera", "Simulated Detector (Demo)", "Custom / Other"],
             width=22
         )
         self.cbo_camera.grid(row=1, column=3, sticky="w", padx=5, pady=4)

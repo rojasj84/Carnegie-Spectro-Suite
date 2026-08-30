@@ -509,17 +509,13 @@ class VBFormApp(tk.Tk):
                     elif t_val is not None:
                         txt = f"Detector Temp: {t_val:.1f} °C" + (f" [{st_str}]" if st_str else "")
                         fg = "#008800" if stat_code == 2 else ("#CC6600" if stat_code == 1 else "#CC0000")
-                    elif raw_val is not None:
-                        # Real, connected register read -- not calibrated to Celsius yet,
-                        # but close enough to the one known-cold sample (-98C) to report
-                        # a coarse cold/not-cold status honestly, without a fabricated number.
-                        is_cold = temp_info.get("is_near_cold_reference")
-                        if is_cold:
-                            txt = f"Detector Temp: COLD (reg=0x{raw_val:04X})"
-                            fg = "#008800"
-                        else:
-                            txt = f"Detector Temp: NOT AT COLD REF (reg=0x{raw_val:04X})"
-                            fg = "#CC6600"
+                    elif st_str == "NO_LIVE_TEMP":
+                        # ST-133: 0x46 reads 0 while the cooler/sense loop is idle
+                        # (warm detector). Show the last programmed setpoint instead.
+                        sp = temp_info.get("setpoint_c")
+                        txt = ("Detector Temp: no live reading"
+                               + (f"  (setpoint {sp:.0f} °C)" if sp is not None else ""))
+                        fg = "#CC6600"
                     else:
                         txt = "Detector Temp: OFFLINE"
                         fg = "#888888"

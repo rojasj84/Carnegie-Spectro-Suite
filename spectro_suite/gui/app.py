@@ -411,6 +411,11 @@ class HoribaApp(ctk.CTk):
                     if is_sim:
                         txt = "Detector Temp: Offline (Simulated)"
                         fg = "#9CA3AF"
+                    elif t_val is None:
+                        sp = temp_info.get("setpoint_c")
+                        txt = f"Detector Temp: {st_str or 'OFFLINE'}" + (
+                            f"  (setpoint {sp:.0f} °C)" if sp is not None else "")
+                        fg = "#F59E0B" if st_str and st_str != "OFFLINE" else "#9CA3AF"
                     elif st_str:
                         txt = f"Detector Temp: {t_val:.1f} °C [{st_str}]"
                         fg = "#10B981" if stat_code == 2 else ("#F59E0B" if stat_code == 1 else "#EF4444")
