@@ -24,7 +24,7 @@ flooded by dark current.
 | Frame readout `0x82` | ✅ 1024 bytes, reproducible (N/N) |
 | **Exposure / integration time** | ✅ **register `0x32`, LOW BYTE (0x00–0xFF)** — found 2026-08-30. Frame mean scales ~linearly. `0` → flat bias frame (~260 counts). |
 | Real spectrum | ⏳ needs **cold detector + light source** |
-| Live temperature | ❌ `0x46` reads `0x0000` (cooler/sense loop idle while warm). `0x54` = `0x9E9E` = −98 °C is the **stale cooler setpoint**, NOT current temperature. |
+| Live temperature | ❌ `0x46` reads `0x0000` (cooler/sense loop idle while warm). `0x54` = `0x9E9E` = **−98 °C, dead stable** = the *achieved* steady-state temp from the last cold run (matched WinSpec's display). NOT the setpoint — that run's setpoint was −100 °C and is nowhere in the 256-register file; the −2° gap is normal cooler undershoot, no offset. |
 
 ---
 
@@ -39,7 +39,7 @@ cam = ST133LibUsbCamera(exposure_units=0)   # 0..255
 cam.connect()                               # finds device, claims iface, runs init burst
 frame, count = cam.acquire_frame()          # (int64[512], 1)
 cam.set_exposure_units(64); cam.acquire_frame()
-cam.get_temperature()                       # temperature_c None + NO_LIVE_TEMP while warm; setpoint_c = -98
+cam.get_temperature()                       # temperature_c None + NO_LIVE_TEMP while warm; cached_temp_c = -98
 ```
 
 Or via the factory: model string containing `"LIBUSB"` →
@@ -57,7 +57,7 @@ Or via the factory: model string containing `"LIBUSB"` →
 |---|---|
 | `0x40` | write-then-readback echo (liveness: write `0x5A` → read `0x5A5A`) |
 | `0x46` | **live** temperature ADC (per decompiled `PICM_Get_Temperature`; 10-sample avg + linear cal). Reads `0` while warm. |
-| `0x54` | on READ = cooler **setpoint** (low byte int8 °C). on WRITE = PTG timing-table download target. |
+| `0x54` | on READ = **cached last-good temperature** (low byte int8 °C; −98 = last cold steady state, frozen while warm; NOT the setpoint). on WRITE = PTG timing-table download target. |
 | `0x32` | **integration time** (low byte). Also read once right after the trigger. |
 | `0x14` | acquisition trigger (`WRITE 1`) |
 | `0xE2` | busy poll (read ×401 in the arm sequence) |
@@ -76,10 +76,12 @@ Or via the factory: model string containing `"LIBUSB"` →
 ## What Monday looks like
 
 1. **Re-fill LN2** first thing; wait ~1–2 h for the detector to reach setpoint.
-2. Check `cam.get_temperature()` — `0x46` should now be **non-zero** and give a real
-   cold reading. If so we finally have a live-temp anchor to calibrate against
-   (WinSpec displays a number; compare). If `0x46` stays 0 even cold, the live-temp
-   path needs more work (maybe a "start temp sense" command, or it's a different reg).
+2. Check `cam.get_temperature()` as it cools — watch **`0x46`** (should go non-zero)
+   AND **`0x54`** (does the cached value track down toward the real temp, or stay
+   frozen at −98?). Compare both against WinSpec's live number in real time. That
+   pins the `0x46` calibration (likely 1:1, no offset) and tells us whether `0x54`
+   is a live cache or a one-shot latch. Setpoint that run was −100 °C; expect the
+   detector to settle ~−98 (normal ~2° undershoot).
 3. **Real spectrum test**: `exposure_units=0` baseline, then a modest value (say 16–48),
    dark (capped) vs. a light source. On a cold detector the dark frame should be a
    flat low baseline; light should produce a coherent bump. Use

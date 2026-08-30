@@ -34,7 +34,7 @@ import numpy as np
 
 from ..base import Camera as BaseCamera
 from .st133_usb import (
-    REG_SELFTEST, REG_TEMPERATURE, REG_TEMP_SETPOINT, REG_EXPOSURE,
+    REG_SELFTEST, REG_TEMPERATURE, REG_TEMP_CACHED, REG_EXPOSURE,
     REG_RECONFIG_BURST_A, REG_ARM_PREP, REG_ARM_POST, REG_RECONFIG_BURST_B,
     VR_ARM_PREP, BUSY_POLL_COUNT, REG_ACQ_BUSY, REG_ACQ_PRETRIGGER,
     REG_ACQ_TRIGGER, REG_ACQ_POSTTRIGGER,
@@ -311,18 +311,19 @@ class ST133LibUsbCamera(BaseCamera):
 
     def get_temperature(self) -> Optional[dict]:
         """
-        Live temperature from REG_TEMPERATURE (0x46); cooler setpoint from
-        REG_TEMP_SETPOINT (0x54). While the detector is warm / cooler loop
-        idle, 0x46 reads 0 -> temperature_c is None with status NO_LIVE_TEMP.
+        Live temperature from REG_TEMPERATURE (0x46). REG_TEMP_CACHED (0x54)
+        holds the last-good steady-state reading (-98 C from the last cold run,
+        NOT a setpoint). While the detector is warm / cooler loop idle, 0x46
+        reads 0 -> temperature_c is None with status NO_LIVE_TEMP.
         """
-        raw_t = raw_s = None
-        temp_c = setpoint_c = None
+        raw_t = raw_c = None
+        temp_c = cached_c = None
         status = "OFFLINE"
         if self.is_connected and self._dev is not None:
             with self._io_lock:
                 raw_t = self._rd(REG_TEMPERATURE)
-                raw_s = self._rd(REG_TEMP_SETPOINT)
-            setpoint_c = _int8_celsius(raw_s)
+                raw_c = self._rd(REG_TEMP_CACHED)
+            cached_c = _int8_celsius(raw_c)
             if raw_t:
                 temp_c = _int8_celsius(raw_t)
                 status = "OK" if temp_c is not None else "DECODE_IMPLAUSIBLE"
@@ -332,11 +333,12 @@ class ST133LibUsbCamera(BaseCamera):
                 status = "NO_LIVE_TEMP"
         return {
             "temperature_c": temp_c,
-            "setpoint_c": setpoint_c,
+            "cached_temp_c": cached_c,
+            "setpoint_c": None,
             "status": 1 if temp_c is not None else 0,
             "status_str": status,
             "raw_register": raw_t,
-            "raw_setpoint": raw_s,
+            "raw_cached": raw_c,
             "is_simulated": False,
         }
 

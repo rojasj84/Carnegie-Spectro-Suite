@@ -511,10 +511,10 @@ class VBFormApp(tk.Tk):
                         fg = "#008800" if stat_code == 2 else ("#CC6600" if stat_code == 1 else "#CC0000")
                     elif st_str == "NO_LIVE_TEMP":
                         # ST-133: 0x46 reads 0 while the cooler/sense loop is idle
-                        # (warm detector). Show the last programmed setpoint instead.
-                        sp = temp_info.get("setpoint_c")
+                        # (warm detector). Show the last-good cached reading.
+                        cc = temp_info.get("cached_temp_c")
                         txt = ("Detector Temp: no live reading"
-                               + (f"  (setpoint {sp:.0f} °C)" if sp is not None else ""))
+                               + (f"  (last cold: {cc:.0f} °C)" if cc is not None else ""))
                         fg = "#CC6600"
                     else:
                         txt = "Detector Temp: OFFLINE"

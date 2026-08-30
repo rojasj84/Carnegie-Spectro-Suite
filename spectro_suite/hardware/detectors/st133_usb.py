@@ -165,11 +165,17 @@ REG_TEMPERATURE      = 0x46   # LIVE detector temperature. Decompiled PICM_Get_T
                               # the ST-133 (PIXCM32 FUN_10058ab2 -> PIPP_Input(handle, 0x46))
                               # reads 10 ADC samples here, averages, applies a linear cal.
                               # Reads 0x0000 while the detector is warm / cooler loop idle.
-REG_TEMP_SETPOINT    = 0x54   # Cooler SETPOINT (on READ): low byte as two's-complement int8
-                              # degrees C. Read 0x9E9E = -98 C on 2026-08-30 -- but this is the
-                              # last value WinSpec programmed, NOT a live reading (it never
-                              # changes, detector was warm). Same address is the PTG timing-
-                              # table DOWNLOAD target on WRITE.
+REG_TEMP_CACHED      = 0x54   # CACHED last-good temperature (on READ): low byte as two's-
+                              # complement int8 degrees C. Read 0x9E9E = -98 C on 2026-08-30
+                              # and dead stable -- this is the steady-state temperature from
+                              # the last cold run (matched WinSpec's -98 display exactly),
+                              # frozen while the detector is warm. NOT the setpoint (that run's
+                              # setpoint was -100 C and is not in the register file at all; a
+                              # cooled detector settling ~2 C warm of setpoint is normal -- no
+                              # offset). Unknown yet whether 0x54 updates live once cold or is
+                              # a one-shot latch. Same address is the PTG timing-table DOWNLOAD
+                              # target on WRITE.
+REG_TEMP_SETPOINT    = REG_TEMP_CACHED  # back-compat alias; see above -- it is NOT the setpoint
 REG_EXPOSURE         = 0x32   # Integration time, LOW BYTE (0x00..0xFF). Identified 2026-08-30:
                               # frame mean counts scale ~linearly with this value (dark-current
                               # integration on a warm detector). Written just before the busy-
@@ -228,12 +234,13 @@ REG_HEARTBEAT_ECHO   = 0x40
 REG_HEARTBEAT_WALK   = 0x4A
 HEARTBEAT_INTERVAL_SEC = 0.1
 
-# Both REG_TEMPERATURE (0x46, live) and REG_TEMP_SETPOINT (0x54, setpoint)
-# carry a value in their low byte; read as two's-complement int8 it is degrees
-# Celsius (no scale/offset known -- one anchor: 0x54 low byte 0x9E = -98, the
-# setpoint WinSpec last programmed). REAL calibration of 0x46 (slope/offset,
-# per decompiled PICM_Get_Temperature) is still TODO and needs a cold detector
-# to pin down. Values outside this window are flagged as an implausible decode.
+# REG_TEMPERATURE (0x46, live) and REG_TEMP_CACHED (0x54, last-good) both carry
+# a value in their low byte; read as two's-complement int8 it is degrees C.
+# One anchor: 0x54 = 0x9E = -98, which matched WinSpec's cold display exactly
+# (that run's setpoint was -100; -98 is the achieved steady state, ~2 C warm of
+# setpoint -- normal, NO offset). Whether 0x54 = 0x9E is exactly -98 or e.g.
+# needs a small slope is unknown; only a cold-detector run against WinSpec's
+# live number will pin the 0x46 calibration. Outside this window => implausible.
 TEMP_C_PLAUSIBLE_MIN = -140
 TEMP_C_PLAUSIBLE_MAX = 60
 
@@ -1576,25 +1583,25 @@ class ST133Camera(BaseCamera):
         Detector temperature.
 
         REVISED 2026-08-30: the LIVE temperature is REG_TEMPERATURE (0x46), per
-        decompiled PICM_Get_Temperature. On this unit it currently reads
-        0x0000 -- the detector is warm and the cooler/temperature-sense loop is
-        not running, so there is no live reading yet. REG_TEMP_SETPOINT (0x54)
-        still holds the last cooler setpoint WinSpec programmed (low byte int8
-        C, e.g. -98) -- that is NOT the current temperature, it never changes.
+        decompiled PICM_Get_Temperature. On this unit it currently reads 0x0000
+        -- detector warm, cooler/temperature-sense loop idle, no live reading.
+        REG_TEMP_CACHED (0x54) holds -98 C (dead stable) -- the steady-state
+        temperature from the last cold run (matched WinSpec's display exactly),
+        NOT the setpoint (that run's setpoint was -100 C; the detector settled
+        ~2 C warm of it, which is normal -- there is no offset).
 
         Reported as: temperature_c from 0x46 when non-zero and plausibly
-        decodable, else None with status NO_LIVE_TEMP; setpoint_c from 0x54.
-        A real 0x46 slope/offset calibration is still TODO (needs a cold
-        detector to pin down).
+        decodable, else None with status NO_LIVE_TEMP; cached_temp_c from 0x54.
+        Real 0x46 slope/offset calibration is TODO (needs a cold detector).
         """
-        raw_temp = raw_set = None
-        temp_c = setpoint_c = None
+        raw_temp = raw_cached = None
+        temp_c = cached_c = None
         status_str = "OFFLINE"
 
         if self.is_connected and self._winusb_handle:
             raw_temp = self._bulk_read_register(REG_TEMPERATURE)
-            raw_set = self._bulk_read_register(REG_TEMP_SETPOINT)
-            setpoint_c = self._int8_c(raw_set)
+            raw_cached = self._bulk_read_register(REG_TEMP_CACHED)
+            cached_c = self._int8_c(raw_cached)
             if raw_temp:  # non-zero -> a live reading is available
                 temp_c = self._int8_c(raw_temp)
                 status_str = "OK" if temp_c is not None else "DECODE_IMPLAUSIBLE"
@@ -1605,11 +1612,12 @@ class ST133Camera(BaseCamera):
 
         return {
             "temperature_c": temp_c,
-            "setpoint_c": setpoint_c,
+            "cached_temp_c": cached_c,   # last-good reading from 0x54 (see docstring; NOT a setpoint)
+            "setpoint_c": None,          # true setpoint not exposed in the register file
             "status": 1 if temp_c is not None else 0,
             "status_str": status_str,
             "raw_register": raw_temp,
-            "raw_setpoint": raw_set,
+            "raw_cached": raw_cached,
             "is_simulated": False,
         }
 
