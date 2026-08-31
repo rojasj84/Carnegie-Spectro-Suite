@@ -1,7 +1,12 @@
 {
-  "_comment": "ST-133 / OMA-V InGaAs temperature calibration. Copy this file to 'st133_temp_cal.json' (same folder) to enable a real Celsius readout in st133_libusb.py. Each point is [adc_low_byte, celsius]: read the ADC value from get_temperature()['raw_adc'] (or the GUI 'ADC nnn' text) and pair it with WinSpec32's live displayed temperature at the same moment, taken at 2-3 points across a cool-down. >=2 points -> a linear fit is used. Delete this and add a 'poly' key with polyfit coefficients (highest order first) for a non-linear curve.",
-  "points": [
-    [93, -92.0],
-    [140, -99.0]
-  ]
+  "_comment": "ST-133 / OMA-V InGaAs temperature calibration for st133_libusb.py. Copy to 'st133_temp_cal.json' (same folder). The 0x46 low byte is a live value; the working model is T_C = room_c - adc_byte (slope -1, offset = room temperature). Pick ONE of the keys below. If no file is present the default is room_c = 25 (status PROVISIONAL).",
+
+  "_option_1_room_offset": "keep the room_c - adc model, just set your lab temperature:",
+  "room_c": 25.0,
+
+  "_option_2_two_point_fit": "delete room_c and use >=2 [adc_low_byte, celsius] pairs (read raw_adc from get_temperature() or the GUI 'ADC nn' text, pair with WinSpec32's live displayed temp at a couple of points during cool-down) -> linear fit, status OK:",
+  "_points_example": [[93, -68.0], [122, -98.0]],
+
+  "_option_3_explicit_poly": "delete the others and give [m, b] for T = m*adc + b:",
+  "_poly_example": [-1.0, 25.0]
 }

@@ -93,21 +93,26 @@ def _int8_celsius(word: Optional[int]) -> Optional[float]:
     return float(c) if TEMP_C_PLAUSIBLE_MIN <= c <= TEMP_C_PLAUSIBLE_MAX else None
 
 
-# --- REG_TEMPERATURE (0x46) ADC -> Celsius calibration --------------------
-# The 0x46 low byte is a live ADC value (0x00 while warm/invalid; 0x5D at
-# ~1 h into a cool-down 2026-08-31). The ADC->C curve is NOT known. Drop a
-# JSON file next to the config to calibrate it:
-#   config/st133_temp_cal.json  ->  {"points": [[93, -92.0], [140, -99.0], ...]}
-# (adc_low_byte, celsius pairs from WinSpec's live display). >=2 points -> a
-# linear fit is used; otherwise temperature_c stays None (status UNCAL) and
-# raw_adc is reported so you can still watch it move.
+# --- REG_TEMPERATURE (0x46) ADC -> Celsius --------------------------------
+# The 0x46 low byte is a live value (0x00 while warm/invalid). Working model
+# (2026-08-31): it is a DELTA below ambient, so
+#         T_detector_C = room_c - adc_byte     (slope exactly -1)
+# Verified self-consistently: adc plateaued at 122 as the detector reached its
+# -98..-100 C steady state, implying room ~= 24-26 C. This is the default
+# conversion (status PROVISIONAL). Override / refine with a JSON file:
+#   config/st133_temp_cal.json  ->  one of
+#     {"room_c": 24.5}                       # keeps the room_c - adc model
+#     {"points": [[93,-68],[122,-98], ...]}  # >=2 (adc,C) pairs -> linear fit
+#     {"poly": [m, b]}                        # T = m*adc + b
 _TEMP_CAL_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
     "config", "st133_temp_cal.json",
 )
+_DEFAULT_ROOM_C = 25.0
 
 
 def _load_temp_cal():
+    room_c = _DEFAULT_ROOM_C
     try:
         with open(_TEMP_CAL_PATH) as fh:
             d = json.load(fh)
@@ -118,18 +123,22 @@ def _load_temp_cal():
             xs = np.array([p[0] for p in pts]); ys = np.array([p[1] for p in pts])
             m, b = np.polyfit(xs, ys, 1)
             return ("poly", [float(m), float(b)])
+        if d.get("room_c") is not None:
+            room_c = float(d["room_c"])
     except FileNotFoundError:
         pass
     except Exception as ex:
         logger.warning(f"ST-133 temp cal file unreadable ({_TEMP_CAL_PATH}): {ex}")
-    return (None, None)
+    return ("room_minus_adc", room_c)
 
 
 def _adc_to_celsius(adc_byte: int):
+    """Returns (celsius, is_fitted). is_fitted True when a points/poly cal is
+    loaded; False for the provisional room_c - adc model."""
     kind, coef = _load_temp_cal()
     if kind == "poly":
-        return float(np.polyval(coef, adc_byte))
-    return None
+        return float(np.polyval(coef, adc_byte)), True
+    return float(coef - adc_byte), False   # room_c - adc
 
 
 class ST133LibUsbCamera(BaseCamera):
@@ -367,11 +376,11 @@ class ST133LibUsbCamera(BaseCamera):
 
     def get_temperature(self) -> Optional[dict]:
         """
-        Live temperature. REG_TEMPERATURE (0x46) low byte is a live ADC value
+        Live temperature. REG_TEMPERATURE (0x46) low byte is a live value
         (0x00 while warm/invalid; non-zero once cold and the sense loop runs).
-        Converted to Celsius via config/st133_temp_cal.json if present
-        (>=2 (adc, C) points -> linear fit); otherwise temperature_c is None
-        with status UNCAL and raw_adc is reported so it can still be watched.
+        Model: T_C = room_c - adc_byte (see _adc_to_celsius). status is
+        "OK" when a fitted points/poly calibration is loaded, "PROVISIONAL"
+        for the default room_c - adc model, "NO_LIVE_TEMP" while warm.
         REG_TEMP_CACHED (0x54) holds the last cold steady-state value (a cache,
         never updates live; NOT a setpoint).
         """
@@ -384,14 +393,12 @@ class ST133LibUsbCamera(BaseCamera):
                 raw_t = self._rd(REG_TEMPERATURE)
                 raw_c = self._rd(REG_TEMP_CACHED)
             cached_c = _int8_celsius(raw_c)
+            fitted = False
             if raw_t:
                 raw_adc = raw_t & 0xFF
-                temp_c = _adc_to_celsius(raw_adc)
-                if temp_c is not None:
-                    self._last_temperature = temp_c
-                    status = "OK"
-                else:
-                    status = "UNCAL"    # live ADC present, no calibration loaded
+                temp_c, fitted = _adc_to_celsius(raw_adc)
+                self._last_temperature = temp_c
+                status = "OK" if fitted else "PROVISIONAL"
             else:
                 status = "NO_LIVE_TEMP"  # 0x46 == 0: warm / sense loop idle
         return {
@@ -399,7 +406,7 @@ class ST133LibUsbCamera(BaseCamera):
             "raw_adc": raw_adc,
             "cached_temp_c": cached_c,
             "setpoint_c": None,
-            "status": 1 if temp_c is not None else 0,
+            "status": (2 if fitted else 1) if temp_c is not None else 0,
             "status_str": status,
             "raw_register": raw_t,
             "raw_cached": raw_c,
