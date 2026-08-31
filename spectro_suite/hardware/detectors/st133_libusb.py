@@ -49,18 +49,20 @@ logger = logging.getLogger(__name__)
 VID, PID = 0x0BD7, 0xA010
 EP_CMD_OUT, EP_REPLY_IN, EP_PIXEL_IN = 0x08, 0x86, 0x82
 
-# Bad pixels / regions on this 512-element InGaAs array (verified 2026-08-30/31):
-#   - pixels 0..63  : a noisy elevated block present even at 0x32=0 -- a
-#                     readout artifact at the start of the shift register (or a
-#                     masked/overscan region). Not signal, not dark current.
-#   - pixel 64      : a large single-pixel spike at the block boundary.
+# 512-element InGaAs array layout (verified 2026-08-30/31 on cold bias frames):
+#   - pixels 0..62  : DARK-REFERENCE region. Real pixels, optically masked --
+#                     elevated pedestal (~290 vs ~218 counts) and noisier
+#                     (std ~45 vs ~1.5). Standard on these Sensors Unlimited
+#                     arrays; mean of this region is a usable dark/background
+#                     level. Left as-is (do NOT zero it).
+#   - pixel 63      : isolated hot pixel at the reference/active boundary.
+#   - pixels 63..510: active science pixels.
 #   - pixel 511     : shift register running off the end (charge injection on
 #                     the last, electrically-terminated element).
-# GOOD_SLICE is the trustworthy science region. _sanitize_frame() flattens the
-# bad zones to the local baseline unless correct_bad_pixels=False.
-BAD_PIXEL_RANGES = ((0, 65),)   # half-open [start, stop)
-BAD_PIXELS = (511,)
-GOOD_SLICE = slice(70, 511)
+# _sanitize_frame() only interpolates the two isolated hot pixels.
+REF_SLICE = slice(0, 63)        # dark-reference pixels (background estimate)
+GOOD_SLICE = slice(63, 511)     # active science region
+BAD_PIXELS = (63, 511)          # isolated hot pixels -> neighbour-interpolated
 # The array reads out through two amplifiers (even / odd pixel index); on this
 # unit the two taps differ by ~10 counts of offset (even ~254, odd ~265 at
 # 0x32=0). Not corrected here -- handle in flat-fielding if it matters.
@@ -336,14 +338,17 @@ class ST133LibUsbCamera(BaseCamera):
 
     @staticmethod
     def _sanitize_frame(frame: np.ndarray) -> np.ndarray:
-        """Flatten the known bad zones to the local science baseline."""
+        """Neighbour-interpolate the isolated hot pixels. Leaves everything
+        else (including the 0..62 dark-reference region) untouched."""
         f = frame.copy()
-        g0, g1 = GOOD_SLICE.start, GOOD_SLICE.stop
-        baseline = int(np.median(f[g0:min(g1, g0 + 60)]))
-        for a, b in BAD_PIXEL_RANGES:
-            f[a:b] = baseline
+        n = len(f)
         for p in BAD_PIXELS:
-            f[p] = f[p - 1] if p > 0 else f[p + 1]
+            if 0 < p < n - 1:
+                f[p] = (f[p - 1] + f[p + 1]) // 2
+            elif p == n - 1:
+                f[p] = f[p - 1]
+            elif p == 0:
+                f[p] = f[p + 1]
         return f
 
     def set_exposure_units(self, units: int) -> None:

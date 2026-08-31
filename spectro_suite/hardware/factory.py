@@ -26,7 +26,10 @@ from .detectors import (
 
 def create_spectrometer(config: SpectrometerConfig, force_mock: bool = False) -> Spectrometer:
     """Instantiate the Spectrometer driver named by config.instrument_model."""
-    is_acton = config.instrument_model.upper() == "ACTON"
+    im = (config.instrument_model or "").upper()
+    # Tolerate descriptive names ("Acton SP-2-150i", "Acton SpectraPro SP-2150 (COM3)")
+    # not just the canonical "ACTON".
+    is_acton = any(k in im for k in ("ACTON", "SP-2", "SP2", "SPECTRAPRO", "SPECTRA PRO"))
 
     if force_mock:
         return MockActonSpectrometer(config) if is_acton else MockHoribaHR460(config)
