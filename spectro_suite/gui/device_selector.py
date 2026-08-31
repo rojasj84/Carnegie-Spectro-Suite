@@ -165,16 +165,16 @@ class DeviceSelectorDialog:
         self.cbo_baud = ttk.Combobox(grid, textvariable=self.var_baud, values=["9600", "19200", "38400", "57600", "115200"], width=12)
         self.cbo_baud.grid(row=1, column=1, sticky="w", padx=5, pady=4)
 
-        # Camera / Detector Driver
-        ttk.Label(grid, text="Detector:", width=15).grid(row=1, column=2, sticky="w", padx=(15, 0), pady=4)
+        # Camera / Detector Driver -- own full-width row (names are long)
+        ttk.Label(grid, text="Detector:", width=15).grid(row=2, column=0, sticky="w", pady=4)
         self.var_camera = tk.StringVar(value="FLIR Blackfly S BFS-U3")
         self.cbo_camera = ttk.Combobox(
             grid,
             textvariable=self.var_camera,
             values=["Princeton Instruments ST-133 InGaAs (512)", "Princeton Instruments ST-133 InGaAs (libusbK)", "FLIR Blackfly S BFS-U3", "PI MTE USB Camera", "Simulated Detector (Demo)", "Custom / Other"],
-            width=22
+            width=46,
         )
-        self.cbo_camera.grid(row=1, column=3, sticky="w", padx=5, pady=4)
+        self.cbo_camera.grid(row=2, column=1, columnspan=3, sticky="w", padx=5, pady=4)
 
         # 4. Remember Option
         self.var_remember = tk.BooleanVar(value=True)
