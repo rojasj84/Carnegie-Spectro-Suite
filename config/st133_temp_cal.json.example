@@ -1,0 +1,7 @@
+{
+  "_comment": "ST-133 / OMA-V InGaAs temperature calibration. Copy this file to 'st133_temp_cal.json' (same folder) to enable a real Celsius readout in st133_libusb.py. Each point is [adc_low_byte, celsius]: read the ADC value from get_temperature()['raw_adc'] (or the GUI 'ADC nnn' text) and pair it with WinSpec32's live displayed temperature at the same moment, taken at 2-3 points across a cool-down. >=2 points -> a linear fit is used. Delete this and add a 'poly' key with polyfit coefficients (highest order first) for a non-linear curve.",
+  "points": [
+    [93, -92.0],
+    [140, -99.0]
+  ]
+}

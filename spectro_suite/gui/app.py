@@ -412,9 +412,12 @@ class HoribaApp(ctk.CTk):
                         txt = "Detector Temp: Offline (Simulated)"
                         fg = "#9CA3AF"
                     elif t_val is None:
-                        cc = temp_info.get("cached_temp_c")
-                        txt = f"Detector Temp: {st_str or 'OFFLINE'}" + (
-                            f"  (last cold: {cc:.0f} °C)" if cc is not None else "")
+                        if st_str == "UNCAL":
+                            txt = f"Detector Temp: cooling  (ADC {temp_info.get('raw_adc')}, uncalibrated)"
+                        else:
+                            cc = temp_info.get("cached_temp_c")
+                            txt = f"Detector Temp: {st_str or 'OFFLINE'}" + (
+                                f"  (last cold: {cc:.0f} °C)" if cc is not None else "")
                         fg = "#F59E0B" if st_str and st_str != "OFFLINE" else "#9CA3AF"
                     elif st_str:
                         txt = f"Detector Temp: {t_val:.1f} °C [{st_str}]"

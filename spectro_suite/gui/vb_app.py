@@ -509,9 +509,14 @@ class VBFormApp(tk.Tk):
                     elif t_val is not None:
                         txt = f"Detector Temp: {t_val:.1f} °C" + (f" [{st_str}]" if st_str else "")
                         fg = "#008800" if stat_code == 2 else ("#CC6600" if stat_code == 1 else "#CC0000")
+                    elif st_str == "UNCAL":
+                        # ST-133: live ADC on 0x46 but no ADC->C calibration
+                        # loaded (config/st133_temp_cal.json). Show the raw ADC.
+                        adc = temp_info.get("raw_adc")
+                        txt = f"Detector Temp: cooling  (ADC {adc}, uncalibrated)"
+                        fg = "#CC6600"
                     elif st_str == "NO_LIVE_TEMP":
-                        # ST-133: 0x46 reads 0 while the cooler/sense loop is idle
-                        # (warm detector). Show the last-good cached reading.
+                        # 0x46 reads 0 -- cooler/sense loop idle (warm detector).
                         cc = temp_info.get("cached_temp_c")
                         txt = ("Detector Temp: no live reading"
                                + (f"  (last cold: {cc:.0f} °C)" if cc is not None else ""))

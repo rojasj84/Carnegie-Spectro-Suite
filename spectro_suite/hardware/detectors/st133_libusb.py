@@ -25,6 +25,8 @@ frame at nonzero integration is dark-current-flooded). Re-cool + light source ne
 See IN_PROGRESS.md at the repo root for the full picture and Monday's plan.
 """
 from __future__ import annotations
+import os
+import json
 import time
 import logging
 import threading
@@ -47,13 +49,18 @@ logger = logging.getLogger(__name__)
 VID, PID = 0x0BD7, 0xA010
 EP_CMD_OUT, EP_REPLY_IN, EP_PIXEL_IN = 0x08, 0x86, 0x82
 
-# Known-bad edge pixels on this 512-element InGaAs array. Verified 2026-08-30
-# on a flat 0x32=0 baseline: pixels 0..510 sit at a clean ~260 counts (std ~2),
-# but pixel 511 reads ~2100 +/- 380 -- the shift-register readout running off
-# the end of the array (charge injection / clock feedthrough on the last
-# element, which is an electrically-terminated dummy cell). Replaced with the
-# nearest good neighbour unless correct_bad_pixels=False.
+# Bad pixels / regions on this 512-element InGaAs array (verified 2026-08-30/31):
+#   - pixels 0..63  : a noisy elevated block present even at 0x32=0 -- a
+#                     readout artifact at the start of the shift register (or a
+#                     masked/overscan region). Not signal, not dark current.
+#   - pixel 64      : a large single-pixel spike at the block boundary.
+#   - pixel 511     : shift register running off the end (charge injection on
+#                     the last, electrically-terminated element).
+# GOOD_SLICE is the trustworthy science region. _sanitize_frame() flattens the
+# bad zones to the local baseline unless correct_bad_pixels=False.
+BAD_PIXEL_RANGES = ((0, 65),)   # half-open [start, stop)
 BAD_PIXELS = (511,)
+GOOD_SLICE = slice(70, 511)
 # The array reads out through two amplifiers (even / odd pixel index); on this
 # unit the two taps differ by ~10 counts of offset (even ~254, odd ~265 at
 # 0x32=0). Not corrected here -- handle in flat-fielding if it matters.
@@ -82,6 +89,45 @@ def _int8_celsius(word: Optional[int]) -> Optional[float]:
     b = word & 0xFF
     c = b - 256 if b >= 128 else b
     return float(c) if TEMP_C_PLAUSIBLE_MIN <= c <= TEMP_C_PLAUSIBLE_MAX else None
+
+
+# --- REG_TEMPERATURE (0x46) ADC -> Celsius calibration --------------------
+# The 0x46 low byte is a live ADC value (0x00 while warm/invalid; 0x5D at
+# ~1 h into a cool-down 2026-08-31). The ADC->C curve is NOT known. Drop a
+# JSON file next to the config to calibrate it:
+#   config/st133_temp_cal.json  ->  {"points": [[93, -92.0], [140, -99.0], ...]}
+# (adc_low_byte, celsius pairs from WinSpec's live display). >=2 points -> a
+# linear fit is used; otherwise temperature_c stays None (status UNCAL) and
+# raw_adc is reported so you can still watch it move.
+_TEMP_CAL_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+    "config", "st133_temp_cal.json",
+)
+
+
+def _load_temp_cal():
+    try:
+        with open(_TEMP_CAL_PATH) as fh:
+            d = json.load(fh)
+        if isinstance(d.get("poly"), list) and len(d["poly"]) >= 2:
+            return ("poly", d["poly"])
+        pts = [(float(a), float(c)) for a, c in d.get("points", [])]
+        if len(pts) >= 2:
+            xs = np.array([p[0] for p in pts]); ys = np.array([p[1] for p in pts])
+            m, b = np.polyfit(xs, ys, 1)
+            return ("poly", [float(m), float(b)])
+    except FileNotFoundError:
+        pass
+    except Exception as ex:
+        logger.warning(f"ST-133 temp cal file unreadable ({_TEMP_CAL_PATH}): {ex}")
+    return (None, None)
+
+
+def _adc_to_celsius(adc_byte: int):
+    kind, coef = _load_temp_cal()
+    if kind == "poly":
+        return float(np.polyval(coef, adc_byte))
+    return None
 
 
 class ST133LibUsbCamera(BaseCamera):
@@ -241,14 +287,16 @@ class ST133LibUsbCamera(BaseCamera):
         frame. Integration time is self.exposure_units (REG_EXPOSURE), NOT
         exposure_time_sec (units unknown). Returns (int64[num_pixels], count).
 
-        correct_bad_pixels: replace BAD_PIXELS (the run-off-the-end pixel 511)
-        with the nearest good neighbour. Set False to see the raw array.
+        correct_bad_pixels: flatten BAD_PIXEL_RANGES / BAD_PIXELS to the local
+        baseline (see _sanitize_frame). Set False for the raw array.
 
-        exposure_time_sec is mapped to REG_EXPOSURE with a PLACEHOLDER scale
-        (1.0 s -> 250, WinSpec's captured value) so a GUI exposure slider does
-        something. The true units->seconds relation is not yet characterised;
-        set self.exposure_units directly for reproducible raw control, or pass
-        exposure_time_sec <= 0 to use self.exposure_units unchanged.
+        exposure_time_sec -> REG_EXPOSURE integration units (0..255) as
+        round(sec * 250), clamped. 0x32 is a real integration-time register
+        (frame level scales ~linearly with it); the exact units->seconds
+        relation isn't characterised yet, so treat the seconds field as a
+        relative knob: ~1.0 s is full scale, use 0.02-0.5 for a bright line.
+        Set self.exposure_units directly, or pass exposure_time_sec <= 0, for
+        raw control.
         """
         if exposure_time_sec and exposure_time_sec > 0:
             self.exposure_units = int(max(0, min(255, round(exposure_time_sec * 250))))
@@ -281,19 +329,22 @@ class ST133LibUsbCamera(BaseCamera):
         data = result.get("data")
         if data and len(data) >= n_bytes:
             frame = np.frombuffer(data[:n_bytes], dtype="<u2").astype(np.int64)
-            if correct_bad_pixels:
-                frame = frame.copy()
-                for p in BAD_PIXELS:
-                    if 0 < p < self.num_pixels - 1:
-                        frame[p] = (frame[p - 1] + frame[p + 1]) // 2
-                    elif p == self.num_pixels - 1:
-                        frame[p] = frame[p - 1]
-                    elif p == 0:
-                        frame[p] = frame[p + 1]
-            return frame, 1
+            return (self._sanitize_frame(frame) if correct_bad_pixels else frame), 1
         if "err" in result:
             logger.warning(f"ST-133 no frame on 0x82: {result['err']}")
         return np.zeros(self.num_pixels, dtype=np.int64), 0
+
+    @staticmethod
+    def _sanitize_frame(frame: np.ndarray) -> np.ndarray:
+        """Flatten the known bad zones to the local science baseline."""
+        f = frame.copy()
+        g0, g1 = GOOD_SLICE.start, GOOD_SLICE.stop
+        baseline = int(np.median(f[g0:min(g1, g0 + 60)]))
+        for a, b in BAD_PIXEL_RANGES:
+            f[a:b] = baseline
+        for p in BAD_PIXELS:
+            f[p] = f[p - 1] if p > 0 else f[p + 1]
+        return f
 
     def set_exposure_units(self, units: int) -> None:
         self.exposure_units = int(units) & 0xFF
@@ -311,13 +362,17 @@ class ST133LibUsbCamera(BaseCamera):
 
     def get_temperature(self) -> Optional[dict]:
         """
-        Live temperature from REG_TEMPERATURE (0x46). REG_TEMP_CACHED (0x54)
-        holds the last-good steady-state reading (-98 C from the last cold run,
-        NOT a setpoint). While the detector is warm / cooler loop idle, 0x46
-        reads 0 -> temperature_c is None with status NO_LIVE_TEMP.
+        Live temperature. REG_TEMPERATURE (0x46) low byte is a live ADC value
+        (0x00 while warm/invalid; non-zero once cold and the sense loop runs).
+        Converted to Celsius via config/st133_temp_cal.json if present
+        (>=2 (adc, C) points -> linear fit); otherwise temperature_c is None
+        with status UNCAL and raw_adc is reported so it can still be watched.
+        REG_TEMP_CACHED (0x54) holds the last cold steady-state value (a cache,
+        never updates live; NOT a setpoint).
         """
         raw_t = raw_c = None
         temp_c = cached_c = None
+        raw_adc = None
         status = "OFFLINE"
         if self.is_connected and self._dev is not None:
             with self._io_lock:
@@ -325,14 +380,18 @@ class ST133LibUsbCamera(BaseCamera):
                 raw_c = self._rd(REG_TEMP_CACHED)
             cached_c = _int8_celsius(raw_c)
             if raw_t:
-                temp_c = _int8_celsius(raw_t)
-                status = "OK" if temp_c is not None else "DECODE_IMPLAUSIBLE"
+                raw_adc = raw_t & 0xFF
+                temp_c = _adc_to_celsius(raw_adc)
                 if temp_c is not None:
                     self._last_temperature = temp_c
+                    status = "OK"
+                else:
+                    status = "UNCAL"    # live ADC present, no calibration loaded
             else:
-                status = "NO_LIVE_TEMP"
+                status = "NO_LIVE_TEMP"  # 0x46 == 0: warm / sense loop idle
         return {
             "temperature_c": temp_c,
+            "raw_adc": raw_adc,
             "cached_temp_c": cached_c,
             "setpoint_c": None,
             "status": 1 if temp_c is not None else 0,

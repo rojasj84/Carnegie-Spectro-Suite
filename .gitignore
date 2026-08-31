@@ -43,3 +43,7 @@ config/app_settings.json
 USB Capture/analysis/
 pcap_summary_for_claude.md
 generate_pcap_summary.py
+
+# gemini scratch
+search_*.py
+search_*.out
